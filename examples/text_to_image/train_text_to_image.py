@@ -337,12 +337,12 @@ class EMAModel:
 
 
 @torch.inference_mode()
-def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, tokenizer, pretrained_path):
+def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, tokenizer, pretrained_path, weight_dtype):
     state_dict = unet.state_dict()
     
     unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
     unet.load_state_dict(state_dict)
-    unet.to(torch.bfloat16)
+    unet.to(weight_dtype)
     unet.eval()
     unet.to(accelerator.device)
     
@@ -704,8 +704,12 @@ def main():
                     gen_dir = os.path.join(args.output_dir, "generations", f"{global_step}")
                     os.makedirs(gen_dir, exist_ok=True)
 
-                    pipe = models_to_pipe(accelerator, args.use_ema, unet, ema_unet, 
-                                          text_encoder, vae, tokenizer, args.pretrained_model_name_or_path)
+                    pipe = models_to_pipe(accelerator, args.use_ema,
+                                          unet, ema_unet, 
+                                          text_encoder, vae, 
+                                          tokenizer, 
+                                          args.pretrained_model_name_or_path,
+                                          weight_dtype)
 
 
                     prompts = ["full body portrait of Dilraba, slight smile, diffuse natural sun lights, autumn lights, highly detailed, digital painting, artstation, concept art, sharp focus, illustration",
@@ -718,7 +722,11 @@ def main():
 
                     import wandb
                     out_dict = {}
-                    resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
+                    
+                    if args.max_width > 256:
+                        resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
+                    else:
+                        resolutions = [(128, 128), (64, 64), (128, 64), (64, 128)]
                     for width, height in resolutions:
                         for i, p in enumerate(prompts):
                             pil_img = pipe(p, output_type="pil", num_inference_steps=30,
