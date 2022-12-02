@@ -12,7 +12,10 @@ accelerate launch --mixed_precision="fp16" --num_processes=2 train_text_to_image
   --use_8bit_adam \
   --mixed_precision="fp16" \
   --max_files=100 \
-  --max_width=256 \
-  --max_height=256 \
+  --max_width=128 \
+  --max_height=128 \
+  --min_height=64 \
+  --min_width=64 \
+  --hub_token="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"
 
 #  --use_ema \
