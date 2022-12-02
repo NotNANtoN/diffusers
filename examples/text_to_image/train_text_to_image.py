@@ -73,6 +73,18 @@ def parse_args():
         help="Max height for train imges",
     )
     parser.add_argument(
+        "--min_width",
+        type=int,
+        default=128,
+        help="Max width for train images",
+    )
+    parser.add_argument(
+        "--min_height",
+        type=int,
+        default=128,
+        help="Max height for train imges",
+    )
+    parser.add_argument(
         "--train_data_dir",
         type=str,
         default=None,
@@ -374,7 +386,8 @@ def main():
     if accelerator.is_main_process:
         if args.push_to_hub:
             if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
+                repo_name = get_full_repo_name(Path(args.output_dir).name, 
+                                               token=args.hub_token)
             else:
                 repo_name = args.hub_model_id
             repo = Repository(args.output_dir, clone_from=repo_name)
@@ -463,7 +476,7 @@ def main():
                 df = pd.read_parquet(cache)
             else:
                 
-                df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=128, min_height=128, max_files=args.max_files)
+                df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=args.min_width, min_height=args.min_height, max_files=args.max_files)
                 df = assign_to_buckets(df, 
                                        bucket_step_size=64, 
                                        max_width=args.max_width, max_height=args.max_height,

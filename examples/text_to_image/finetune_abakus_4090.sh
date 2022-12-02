@@ -12,7 +12,8 @@ accelerate launch --mixed_precision="bf16" train_text_to_image.py \
   --use_8bit_adam \
   --mixed_precision="bf16" \
   --max_files=100 \
-  --max_width=384 \
-  --max_height=384 \
+  --max_width=768 \
+  --max_height=768 \
+  --hub_token="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"
 
 #  --use_ema \
