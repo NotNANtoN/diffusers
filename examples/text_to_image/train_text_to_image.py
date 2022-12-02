@@ -55,6 +55,24 @@ def parse_args():
         help="The config of the Dataset, leave as None if there's only one config.",
     )
     parser.add_argument(
+        "--max_files",
+        type=int,
+        default=10,
+        help="Number of parquet files that are opened and used to train for train_data_dir_var_aspect (each contains 10k images).",
+    )
+    parser.add_argument(
+        "--max_width",
+        type=int,
+        default=768,
+        help="Max width for train images",
+    )
+    parser.add_argument(
+        "--max_height",
+        type=int,
+        default=768,
+        help="Max height for train imges",
+    )
+    parser.add_argument(
         "--train_data_dir",
         type=str,
         default=None,
@@ -437,23 +455,18 @@ def main():
             from varying_aspect_ratio_dataset import BucketBatchSampler, BucketDataset
             from torch.utils.data import DataLoader
             from varying_aspect_ratio_dataset import create_df_from_parquets, assign_to_buckets
-
-            path = "/hdd/data/finetune_SD/laion_aesthetics"    
-            
-            max_files = 10
-            
-            cache = f"laion_aesthetics_{max_files}.parquet"
+                        
+            cache = f"laion_aesthetics_{args.max_files}.parquet"
             
             import pandas as pd
             if os.path.exists(cache):
                 df = pd.read_parquet(cache)
             else:
                 
-                df = create_df_from_parquets(path, min_width=128, min_height=128, max_files=max_files)
+                df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=128, min_height=128, max_files=args.max_files)
                 df = assign_to_buckets(df, 
                                        bucket_step_size=64, 
-                                       #max_width=1024, max_height=768,
-                                       max_width=768, max_height=768,
+                                       max_width=args.max_width, max_height=args.max_height,
                                        min_bucket_count=64)
                 df.to_parquet(cache)
 
@@ -463,7 +476,7 @@ def main():
                                     batch_sampler=bucket_batch_sampler, 
                                     pin_memory=True,
                                     shuffle=False, 
-                                    num_workers=1,
+                                    num_workers=16,
                                     drop_last=False)
         
 

@@ -6,6 +6,7 @@ from random import shuffle
 from collections import OrderedDict
 import subprocess
 
+from tqdm.auto import tqdm
 from PIL import Image
 import numpy as np
 import pandas as pd
@@ -39,7 +40,7 @@ def create_df_from_parquets(path,
                 print("Could not load", f)  # download not completed yet for these (should be 8 at most) 
                 
     # extract parquets
-    for p in loaded_parquet_paths:
+    for p in tqdm(loaded_parquet_paths, disable=not verbose, desc="Unpacking .tar files"):
         folder_path = p.replace(".parquet", "")
         tar_path = p.replace(".parquet", ".tar")
         if not os.path.exists(folder_path):
@@ -52,10 +53,6 @@ def create_df_from_parquets(path,
     df = df[df["status"] == "success"].drop(columns=["status"])
     df = df[df["height"] >= min_height]
     df = df[df["width"] >= min_width]
-    
-    # define paths
-    #tar_paths = [os.path.join(path, f + ".tar") for f in df["parquet_id"]]
-    #df["tar_path"] = tar_paths
     
     # define img paths (after extracting tars)
     img_paths = [os.path.join(path, df["parquet_id"].iloc[i], df["key"].iloc[i] + ".jpg") for i in range(len(df))]
@@ -107,15 +104,6 @@ def assign_to_buckets(df, bucket_step_size=64, max_width=1024, max_height=768, m
     return merged_df
 
 
-def get_image_from_tar(tar_path, image_name):
-    with tarfile.open(tar_path) as tar_f:
-        #print(tar_f.getmembers())
-        image = tar_f.extractfile(image_name)
-        image = image.read()
-        image = Image.open(io.BytesIO(image))
-    return image
-
-
 class BucketDataset(Dataset):
     def __init__(self, df, tokenizer):
         self.df = df
@@ -127,28 +115,33 @@ class BucketDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, i):        
-        #if not isinstance(i, int):
-        #    i = int(i[0])
-        
-        # return torch img and tokenized caption
-        row = self.df.iloc[i]
-        
-        # get caption and tokenize
-        caption = str(row.caption)
-        input_ids = self.tokenizer(caption, max_length=self.tokenizer.model_max_length,
-                                   padding="do_not_pad", truncation=True).input_ids
-        padded_tokens = self.tokenizer.pad({"input_ids": input_ids}, 
-                                      padding="max_length",
-                                      #padding=True, 
-                                      return_tensors="pt",
-                                      max_length=77)
-        
-        
-        #tar_path = row.tar_path
-        #img_name = row.key + ".jpg"
-        #pil_img = get_image_from_tar(tar_path, img_name)
-        pil_img = Image.open(row.img_path).convert("RGB")
-        img = self.to_tensor(pil_img)
+        img = None
+        invalid_idcs = []
+            
+        while img is None:
+            row = self.df.iloc[i]
+            try:
+                # return torch img and tokenized caption
+                # get caption and tokenize
+                caption = str(row.caption)
+                input_ids = self.tokenizer(caption, max_length=self.tokenizer.model_max_length,
+                                           padding="do_not_pad", truncation=True).input_ids
+                padded_tokens = self.tokenizer.pad({"input_ids": input_ids}, 
+                                              padding="max_length",
+                                              #padding=True, 
+                                              return_tensors="pt",
+                                              max_length=77)
+
+
+                pil_img = Image.open(row.img_path).convert("RGB")
+                img = self.to_tensor(pil_img)
+            except OSError:
+                print(f"Could not load {row.img_path}")
+                invalid_idcs.append(i)
+                # get different random idx from same bucket
+                bucket_rows = self.df[(self.df.bucket_width == row.bucket_width) & (self.df.bucket_height == row.bucket_height)]
+                bucket_idcs = [idx for idx in bucket_rows.index.to_numpy() if idx not in set(invalid_idcs)]
+                i = np.random.choice(bucket_idcs, 1)[0]
                 
         # resize...
         bucket_width, bucket_height = int(row.bucket_width), int(row.bucket_height)
