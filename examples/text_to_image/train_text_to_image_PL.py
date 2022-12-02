@@ -13,9 +13,6 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import set_seed
 from datasets import load_dataset
 from diffusers import AutoencoderKL, DDPMScheduler, PNDMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DPMSolverMultistepScheduler
 from diffusers.optimization import get_scheduler
@@ -26,9 +23,6 @@ from tqdm.auto import tqdm
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
 
-logger = get_logger(__name__)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
@@ -37,6 +31,13 @@ def parse_args():
         default=None,
         required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--gpus",
+        type=int,
+        default=1,
+        required=False,
+        help="Num GPUs to use for PL",
     )
     parser.add_argument(
         "--dataset_name",
@@ -335,16 +336,60 @@ class EMAModel:
             for p in self.shadow_params
         ]
 
+        
+@torch.inference_mode()  
+def eval_model(args, torch_precision, unet, ema_unet, text_encoder, vae, tokenizer, global_step):
+    gen_dir = os.path.join(args.output_dir, "generations", f"{global_step}")
+    os.makedirs(gen_dir, exist_ok=True)
+
+    pipe = models_to_pipe(args.use_ema,
+                          unet, ema_unet, 
+                          text_encoder, vae, 
+                          tokenizer, 
+                          args.pretrained_model_name_or_path,
+                          torch_precision)
+
+
+    prompts = ["full body portrait of Dilraba, slight smile, diffuse natural sun lights, autumn lights, highly detailed, digital painting, artstation, concept art, sharp focus, illustration",
+               "cyborg woman| with a visible detailed brain| muscles cable wires| biopunk| cybernetic| cyberpunk| white marble bust| canon m50| 100mm| sharp focus| smooth| hyperrealism| highly detailed| intricate details| carved by michelangelo",
+               "Goldorg, demonic orc from Moria, new leader of the Gundabad, strong muscular body, ugly figure, dirty grey skin, burned wrinkled face, body interlaced with frightening armor, metal coatings crossing head, heavy muscular figure, cinematic shot, detailed, trending on Artstation, dark blueish environment, demonic backlight, unreal engine, 8k",
+               "Boris Johnson as smiling Rick Sanchez from Rick and Morty, unibrow, white robe, big eyes, realistic portrait, symmetrical, highly detailed, digital painting, artstation, concept art, smooth, sharp focus, illustration, cinematic lighting, art by artgerm and greg rutkowski and alphonse mucha",
+               "Slavic dog head man, woolen torso in medieval clothes, characteristic of cynocephaly, oil painting, hyperrealism, beautiful, high resolution, trending on artstation",
+               "Jesus taking a selfie, instagram, high detail, glamorous photograph, natural lighting",
+              ]
+
+    import wandb
+    out_dict = {}
+
+    if args.max_width > 256:
+        resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
+    else:
+        resolutions = [(128, 128), (64, 64), (128, 64), (64, 128)]
+    for width, height in resolutions:
+        for i, p in enumerate(prompts):
+            pil_img = pipe(p, output_type="pil", num_inference_steps=30,
+                    guidance_scale=10, seed=11,
+                    width=width, height=height,
+              )[0][0]
+            img_name = f"{i}_{width}x{height}.jpg"
+            img_path = os.path.join(gen_dir, img_name)
+
+            out_dict[f"{width}x{height}/{i}"] = wandb.Image(pil_img)
+            pil_img.save(img_path)
+
+    wandb.log(out_dict)
+    del pipe
+                        
 
 @torch.inference_mode()
-def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, tokenizer, pretrained_path, weight_dtype):
+def models_to_pipe(use_ema, unet, ema_unet, text_encoder, vae, tokenizer, pretrained_path, weight_dtype):
     state_dict = unet.state_dict()
     
     unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
     unet.load_state_dict(state_dict)
     unet.to(weight_dtype)
     unet.eval()
-    unet.to(accelerator.device)
+    unet.to("cuda")
     
     if use_ema:
         ema_unet.copy_to(unet.parameters())
@@ -361,16 +406,117 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, toke
     return pipe
     
     
+from pytorch_lightning import Trainer, LightningModule
+
+
+class LitModel(LightningModule):
+    def __init__(self, args, unet, vae, text_encoder, ema_unet, tokenizer):
+        super().__init__()
+        self.args = args
+        self.unet = unet
+        self.vae = vae
+        self.text_encoder = text_encoder
+        self.ema_unet = ema_unet
+        self.tokenizer = tokenizer
+        self.noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+
+
+        self.torch_precision = args.mixed_precision
+        if self.torch_precision == "fp16":
+            self.torch_precision = torch.float16
+            self.text_encoder = self.text_encoder.half()
+            self.vae = self.vae.half()
+        elif self.torch_precision == "bf16":
+            self.torch_precision = torch.bfloat16
+            self.text_encoder = self.text_encoder.to(torch.bfloat16)
+            self.vae = self.vae.to(torch.bfloat16)
+        self.step = 0
+
+    def training_step(self, batch, batch_idx):
+        latents = self.vae.encode(batch["pixel_values"].to(self.torch_precision)).latent_dist.sample()
+        latents = latents * 0.18215
+
+        #print(batch["pixel_values"].shape, batch["pixel_values"].dtype, batch["pixel_values"].requires_grad)
+        #print(latents.shape, latents.dtype, latents.requires_grad)
+
+        # Sample noise that we'll add to the latents
+        noise = torch.randn_like(latents)
+        bsz = latents.shape[0]
+        # Sample a random timestep for each image
+        timesteps = torch.randint(0, self.noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
+        timesteps = timesteps.long()
+
+        # Add noise to the latents according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
+        noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+
+        # Get the text embedding for conditioning
+        encoder_hidden_states = self.text_encoder(batch["input_ids"])[0]
+
+        # Predict the noise residual and compute loss
+        unet_dtype = self.unet.conv_in.bias.dtype
+        noisy_latents = noisy_latents.to(unet_dtype)
+        encoder_hidden_states = encoder_hidden_states.to(unet_dtype)
+        noise = noise.to(unet_dtype)
+        #print(unet_dtype)
+        noise_pred = self.unet(noisy_latents, timesteps, encoder_hidden_states).sample
+        #loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+        loss = F.mse_loss(noise_pred, noise, reduction="mean")
+
+        if self.args.use_ema:
+            self.ema_unet.step(self.unet.parameters())
+
+        self.step += 1
+        return loss
+
+
+    def val_step(self):
+        eval_model(self.args, self.torch_precision, self.unet, self.ema_unet, self.text_encoder, self.vae, self.tokenizer, self.step)
+
+    def configure_optimizers(self):
+        # Initialize the optimizer
+        if self.args.use_8bit_adam:
+            try:
+                import bitsandbytes as bnb
+            except ImportError:
+                raise ImportError(
+                    "Please install bitsandbytes to use 8-bit Adam. You can do so by running `pip install bitsandbytes`"
+                )
+
+            optimizer_cls = bnb.optim.AdamW8bit
+            print("using 8bit")
+        else:
+            optimizer_cls = torch.optim.AdamW
+        optimizer = optimizer_cls(
+            self.unet.parameters(),
+            lr=self.args.learning_rate,
+            betas=(self.args.adam_beta1, self.args.adam_beta2),
+            weight_decay=self.args.adam_weight_decay,
+            eps=self.args.adam_epsilon,
+        )
+        return optimizer
+        
+        
+def collate_fn(examples):
+    pixel_values = torch.stack([example["pixel_values"] for example in examples])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    input_ids = torch.stack([example["input_ids"] for example in examples])
+    masks = torch.stack([example["attention_mask"] for example in examples])
+    return {
+        "pixel_values": pixel_values,
+        "input_ids": input_ids,
+        "attention_mask": masks,
+    }
+            
+    
 def main():
+    import torch.multiprocessing
+    torch.multiprocessing.set_sharing_strategy('file_system')
+    
+    
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
-
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
-        logging_dir=logging_dir,
-    )
 
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -379,26 +525,8 @@ def main():
     )
 
     # If passed along, set the training seed now.
-    if args.seed is not None:
-        set_seed(args.seed)
-
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, 
-                                               token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            repo = Repository(args.output_dir, clone_from=repo_name)
-
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+    #if args.seed is not None:
+    #    set_seed(args.seed)
 
     # Load models and create wrapper for stable diffusion
     tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
@@ -415,30 +543,8 @@ def main():
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * args.gpus
         )
-
-    # Initialize the optimizer
-    if args.use_8bit_adam:
-        try:
-            import bitsandbytes as bnb
-        except ImportError:
-            raise ImportError(
-                "Please install bitsandbytes to use 8-bit Adam. You can do so by running `pip install bitsandbytes`"
-            )
-
-        optimizer_cls = bnb.optim.AdamW8bit
-    else:
-        optimizer_cls = torch.optim.AdamW
-
-    optimizer = optimizer_cls(
-        unet.parameters(),
-        lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
-        weight_decay=args.adam_weight_decay,
-        eps=args.adam_epsilon,
-    )
-    noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     # Get the datasets: you can either provide your own training and evaluation files (see below)
     # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
@@ -482,95 +588,17 @@ def main():
                                        max_width=args.max_width, max_height=args.max_height,
                                        min_bucket_count=64)
                 df.to_parquet(cache)
-
+                
             bucket_sampler = BucketSampler(df["bucket"], batch_size=args.train_batch_size) 
             train_dataset = BucketDataset(df, tokenizer)
             train_dataloader = DataLoader(train_dataset, batch_size=args.train_batch_size, 
                                           sampler=bucket_sampler, 
                                           pin_memory=True,
                                           shuffle=False, 
+                                          collate_fn=collate_fn,
                                           num_workers=16,
                                           drop_last=False)
-        
-    if args.train_data_dir_var_aspect is None:
-        # Preprocessing the datasets.
-        # We need to tokenize inputs and targets.
-        column_names = dataset["train"].column_names
-
-        # 6. Get the column names for input/target.
-        dataset_columns = dataset_name_mapping.get(args.dataset_name, None)
-        if args.image_column is None:
-            image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
-        else:
-            image_column = args.image_column
-            if image_column not in column_names:
-                raise ValueError(
-                    f"--image_column' value '{args.image_column}' needs to be one of: {', '.join(column_names)}"
-                )
-        if args.caption_column is None:
-            caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
-        else:
-            caption_column = args.caption_column
-            if caption_column not in column_names:
-                raise ValueError(
-                    f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
-                )
-
-        # Preprocessing the datasets.
-        # We need to tokenize input captions and transform the images.
-        def tokenize_captions(examples, is_train=True):
-            captions = []
-            for caption in examples[caption_column]:
-                if isinstance(caption, str):
-                    captions.append(caption)
-                elif isinstance(caption, (list, np.ndarray)):
-                    # take a random caption if there are multiple
-                    captions.append(random.choice(caption) if is_train else caption[0])
-                else:
-                    raise ValueError(
-                        f"Caption column `{caption_column}` should contain either strings or lists of strings."
-                    )
-            inputs = tokenizer(captions, max_length=tokenizer.model_max_length, padding="do_not_pad", truncation=True)
-            input_ids = inputs.input_ids
-            return input_ids
-
-        train_transforms = transforms.Compose(
-            [
-                transforms.Resize((args.resolution, args.resolution), interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
-                transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
-
-        def preprocess_train(examples):
-            images = [image.convert("RGB") for image in examples[image_column]]
-            examples["pixel_values"] = [train_transforms(image) for image in images]
-            examples["input_ids"] = tokenize_captions(examples)
-
-            return examples
-
-        with accelerator.main_process_first():
-            if args.max_train_samples is not None:
-                dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-            # Set the training transforms
-            train_dataset = dataset["train"].with_transform(preprocess_train)
-
-        def collate_fn(examples):
-            pixel_values = torch.stack([example["pixel_values"] for example in examples])
-            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-            input_ids = [example["input_ids"] for example in examples]
-            padded_tokens = tokenizer.pad({"input_ids": input_ids}, padding=True, return_tensors="pt")
-            return {
-                "pixel_values": pixel_values,
-                "input_ids": padded_tokens.input_ids,
-                "attention_mask": padded_tokens.attention_mask,
-            }
-
-        train_dataloader = torch.utils.data.DataLoader(
-            train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=args.train_batch_size
-        )
+                
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -579,28 +607,13 @@ def main():
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
 
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
-        num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
-    )
-
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
-    )
-
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-
-    # Move text_encode and vae to gpu.
-    # For mixed precision training we cast the text_encoder and vae weights to half-precision
-    # as these models are only used for inference, keeping weights in full precision is not required.
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
-    vae.to(accelerator.device, dtype=weight_dtype)
+    
+    #lr_scheduler = get_scheduler(
+    #    args.lr_scheduler,
+    #    optimizer=optimizer,
+    #    num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
+    #    num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
+    #)
 
     # Create EMA for the unet.
     if args.use_ema:
@@ -614,149 +627,63 @@ def main():
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
-    # We need to initialize the trackers we use, and also store our configuration.
-    # The trackers initializes automatically on the main process.
-    if accelerator.is_main_process:
-        accelerator.init_trackers("text2image-fine-tune", config=vars(args))
-
-    # Train!
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
-
-    # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-    progress_bar.set_description("Steps")
-    global_step = 0
-    
-    eval_every = 100 * args.gradient_accumulation_steps
-
-    for epoch in range(args.num_train_epochs):
-        unet.train()
-        train_loss = 0.0
-        for step, batch in enumerate(train_dataloader):
-            try:
-                with accelerator.accumulate(unet):
-                    # Convert images to latent space
-                    print(batch["pixel_values"].shape)
-                    latents = vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
-                    latents = latents * 0.18215
-
-                    # Sample noise that we'll add to the latents
-                    noise = torch.randn_like(latents)
-                    bsz = latents.shape[0]
-                    # Sample a random timestep for each image
-                    timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
-                    timesteps = timesteps.long()
-
-                    # Add noise to the latents according to the noise magnitude at each timestep
-                    # (this is the forward diffusion process)
-                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-
-                    # Get the text embedding for conditioning
-                    encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-
-                    # Predict the noise residual and compute loss
-                    noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
-                    loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
-
-                    # Gather the losses across all processes for logging (if we use distributed training).
-                    avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
-                    train_loss += avg_loss.item() / args.gradient_accumulation_steps
-
-                    # Backpropagate
-                    accelerator.backward(loss)
-                    if accelerator.sync_gradients:
-                        accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad()
-
-                # Checks if the accelerator has performed an optimization step behind the scenes
-                if accelerator.sync_gradients:
-                    if args.use_ema:
-                        ema_unet.step(unet.parameters())
-                    progress_bar.update(1)
-                    global_step += 1
-                    accelerator.log({"train_loss": train_loss}, step=global_step)
-                    train_loss = 0.0
-
-                logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-                progress_bar.set_postfix(**logs)
-
-                if global_step >= args.max_train_steps:
-                    break
-            except KeyboardInterrupt:
-                print("Keyboardinterrupt detected - stopping training and saving the model")
-                break
-                
-            # evaluate model regularly
-            if accelerator.is_local_main_process:
-                if step % eval_every == 0:
-                    gen_dir = os.path.join(args.output_dir, "generations", f"{global_step}")
-                    os.makedirs(gen_dir, exist_ok=True)
-
-                    pipe = models_to_pipe(accelerator, args.use_ema,
-                                          unet, ema_unet, 
-                                          text_encoder, vae, 
-                                          tokenizer, 
-                                          args.pretrained_model_name_or_path,
-                                          weight_dtype)
-
-
-                    prompts = ["full body portrait of Dilraba, slight smile, diffuse natural sun lights, autumn lights, highly detailed, digital painting, artstation, concept art, sharp focus, illustration",
-                               "cyborg woman| with a visible detailed brain| muscles cable wires| biopunk| cybernetic| cyberpunk| white marble bust| canon m50| 100mm| sharp focus| smooth| hyperrealism| highly detailed| intricate details| carved by michelangelo",
-                               "Goldorg, demonic orc from Moria, new leader of the Gundabad, strong muscular body, ugly figure, dirty grey skin, burned wrinkled face, body interlaced with frightening armor, metal coatings crossing head, heavy muscular figure, cinematic shot, detailed, trending on Artstation, dark blueish environment, demonic backlight, unreal engine, 8k",
-                               "Boris Johnson as smiling Rick Sanchez from Rick and Morty, unibrow, white robe, big eyes, realistic portrait, symmetrical, highly detailed, digital painting, artstation, concept art, smooth, sharp focus, illustration, cinematic lighting, art by artgerm and greg rutkowski and alphonse mucha",
-                               "Slavic dog head man, woolen torso in medieval clothes, characteristic of cynocephaly, oil painting, hyperrealism, beautiful, high resolution, trending on artstation",
-                               "Jesus taking a selfie, instagram, high detail, glamorous photograph, natural lighting",
-                              ]
-
-                    import wandb
-                    out_dict = {}
-                    
-                    if args.max_width > 256:
-                        resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
-                    else:
-                        resolutions = [(128, 128), (64, 64), (128, 64), (64, 128)]
-                    for width, height in resolutions:
-                        for i, p in enumerate(prompts):
-                            pil_img = pipe(p, output_type="pil", num_inference_steps=30,
-                                    guidance_scale=10, seed=11,
-                                    width=width, height=height,
-                              )[0][0]
-                            img_name = f"{i}_{width}x{height}.jpg"
-                            img_path = os.path.join(gen_dir, img_name)
-
-                            out_dict[f"{width}x{height}/{i}"] = wandb.Image(pil_img)
-                            pil_img.save(img_path)
-
-                    wandb.log(out_dict)
-                    del pipe
             
+            
+    # Train!
+    total_batch_size = args.train_batch_size * args.gradient_accumulation_steps * args.gpus
+
+    print("***** Running training *****")
+    print(f"  Num examples = {len(train_dataset)}")
+    print(f"  Num Epochs = {args.num_train_epochs}")
+    print(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    print(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    print(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    print(f"  Total optimization steps = {args.max_train_steps}")
+        
+    precision = args.mixed_precision
+    if precision == "fp16":
+        precision = 16
+    elif precision == "fp32":
+        precision = 32
+        
+    # from: https://forums.pytorchlightning.ai/t/gradient-checkpointing-ddp-nan/398/6
+    import pytorch_lightning
+    from pytorch_lightning.overrides import LightningDistributedModule
+    class CustomDDPPlugin(pytorch_lightning.plugins.training_type.DDPPlugin):
+        def configure_ddp(self):
+            self.pre_configure_ddp()
+            self._model = self._setup_model(LightningDistributedModule(self.model))
+            self._register_ddp_hooks()
+            self._model._set_static_graph() # THIS IS THE MAGIC LINE to fix DDP+gradient_checkpointing of unet
+            # note: does not really work well. Increases memory load and maybe completely negates gradient checkpointing. Also, if it sets a static_graph that is not compatible with our various aspect ratios
+    
+    trainer = Trainer(#precision=32, # to make PT lightning work with 8bit adam need fp32
+                      precision=precision,
+                      devices=args.gpus,
+                      accelerator="cuda",
+                      #strategy="dp",
+                      #strategy=CustomDDPPlugin(),
+                      accumulate_grad_batches=args.gradient_accumulation_steps,
+                      max_epochs=args.num_train_epochs,
+                      max_steps=args.max_train_steps,
+                      benchmark=False,
+                      gradient_clip_val=args.max_grad_norm,
+                      val_check_interval=100,
+                     )
+    
+    lit_model = LitModel(args, unet, vae, text_encoder, ema_unet, tokenizer)
+    
+    trainer.fit(lit_model, train_dataloader)
+      
+
     # Create the pipeline using the trained modules and save it.
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        pipe = models_to_pipe(accelerator, args.use_ema,
-                                          unet, ema_unet, 
-                                          text_encoder, vae, 
-                                          tokenizer, 
-                                          args.pretrained_model_name_or_path,
-                                          weight_dtype)
-
-        pipe.save_pretrained(args.output_dir)
-
-        if args.push_to_hub:
-            repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
-
-    accelerator.end_training()
+    pipe = models_to_pipe(args.use_ema,
+                          unet, ema_unet, 
+                          text_encoder, vae, 
+                          tokenizer, 
+                          args.pretrained_model_name_or_path,
+                          lit_model.torch_precision)
+    pipe.save_pretrained(args.output_dir)
 
 
 if __name__ == "__main__":

@@ -180,6 +180,8 @@ class BucketBatchSampler(Sampler):
         self.num_batches = int(np.ceil(self.total_items / batch_size))
         
         self.idcs = np.arange(len(bucketed_idcs))
+        
+        self.sampler = self
 
     def batch_count(self):
         return self.num_batches
@@ -194,8 +196,8 @@ class BucketBatchSampler(Sampler):
             batch_idcs = np.random.choice(bucket_idcs, self.batch_size)
             yield batch_idcs
             
-            
-class BucketBatchSamplerNew(Sampler):
+
+class BucketSampler(Sampler):
     def __init__(self, bucket_assignments, batch_size):
         # put ids into the buckets
         bucketed_idcs = []
@@ -210,6 +212,8 @@ class BucketBatchSamplerNew(Sampler):
         self.num_batches = int(np.ceil(self.total_items / batch_size))
         
         self.idcs = np.arange(len(bucketed_idcs))
+        
+        #self.sampler = self
 
     def batch_count(self):
         return self.num_batches
@@ -230,13 +234,13 @@ class BucketBatchSamplerNew(Sampler):
         for _ in range(self.num_batches):
             count += 1
 
-            batch_idx = np.random.choice(bucket_idcs, 1)
+            batch_idx = np.random.choice(bucket_idcs, 1)[0]
             
             if count == self.batch_size:
                 # choose new bucket
                 bucket_idx = self.sample_bucket()
                 bucket_idcs = self.bucketed_idcs[bucket_idx]
                 
-            
             yield batch_idx
+    
     
