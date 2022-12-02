@@ -465,33 +465,35 @@ def main():
             # See more about loading custom images at
             # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
         elif args.train_data_dir_var_aspect is not None:
-            from varying_aspect_ratio_dataset import BucketBatchSampler, BucketDataset
-            from torch.utils.data import DataLoader
-            from varying_aspect_ratio_dataset import create_df_from_parquets, assign_to_buckets
-                        
-            cache = f"laion_aesthetics_{args.max_files}.parquet"
             
-            import pandas as pd
-            if os.path.exists(cache):
-                df = pd.read_parquet(cache)
-            else:
-                
-                df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=args.min_width, min_height=args.min_height, max_files=args.max_files)
-                df = assign_to_buckets(df, 
-                                       bucket_step_size=64, 
-                                       max_width=args.max_width, max_height=args.max_height,
-                                       min_bucket_count=64)
-                df.to_parquet(cache)
+            if accelerator.is_local_main_process:
+                from varying_aspect_ratio_dataset import BucketBatchSampler, BucketDataset
+                from torch.utils.data import DataLoader
+                from varying_aspect_ratio_dataset import create_df_from_parquets, assign_to_buckets
 
-            bucket_batch_sampler = BucketBatchSampler(df["bucket"], batch_size=args.train_batch_size) 
-            train_dataset = BucketDataset(df, tokenizer)
-            train_dataloader = DataLoader(train_dataset, batch_size=1, 
-                                    batch_sampler=bucket_batch_sampler, 
-                                    pin_memory=True,
-                                    shuffle=False, 
-                                    num_workers=16,
-                                    drop_last=False)
-        
+                cache = f"laion_aesthetics_{args.max_files}.parquet"
+
+                import pandas as pd
+                if os.path.exists(cache):
+                    df = pd.read_parquet(cache)
+                else:
+
+                    df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=args.min_width, min_height=args.min_height, max_files=args.max_files)
+                    df = assign_to_buckets(df, 
+                                           bucket_step_size=64, 
+                                           max_width=args.max_width, max_height=args.max_height,
+                                           min_bucket_count=64)
+                    df.to_parquet(cache)
+
+                bucket_batch_sampler = BucketBatchSampler(df["bucket"], batch_size=args.train_batch_size) 
+                train_dataset = BucketDataset(df, tokenizer)
+                train_dataloader = DataLoader(train_dataset, batch_size=1, 
+                                        batch_sampler=bucket_batch_sampler, 
+                                        pin_memory=True,
+                                        shuffle=False, 
+                                        num_workers=16,
+                                        drop_last=False)
+
 
     if args.train_data_dir_var_aspect is None:
         # Preprocessing the datasets.
@@ -745,8 +747,14 @@ def main():
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        pipe = models_to_pipe(accelerator, args.use_ema, unet, ema_unet, text_encoder, vae, tokenizer, args.pretrained_model_name_or_path)
-        pipeline.save_pretrained(args.output_dir)
+        pipe = models_to_pipe(accelerator, args.use_ema,
+                                          unet, ema_unet, 
+                                          text_encoder, vae, 
+                                          tokenizer, 
+                                          args.pretrained_model_name_or_path,
+                                          weight_dtype)
+
+        pipe.save_pretrained(args.output_dir)
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)

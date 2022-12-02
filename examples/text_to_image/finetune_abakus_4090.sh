@@ -4,11 +4,11 @@ accelerate launch --mixed_precision="bf16" train_text_to_image.py \
   --train_batch_size=1 \
   --gradient_accumulation_steps=8 \
   --gradient_checkpointing \
-  --max_train_steps=2000 \
-  --learning_rate=8e-07 \
+  --max_train_steps=110 \
+  --learning_rate=2e-06 \
   --max_grad_norm=1 \
   --lr_scheduler="constant" --lr_warmup_steps=100 \
-  --output_dir="sdv1-5-var-aspect-titan" \
+  --output_dir="sdv1-5-var-aspect-4" \
   --use_8bit_adam \
   --mixed_precision="bf16" \
   --max_files=100 \
