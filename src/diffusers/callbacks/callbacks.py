@@ -33,18 +33,23 @@ class ContrastLoss:
     
 # TODO: Write colour consistency loss!
 
-lpips_loss = LPIPSLoss(lpips_net="vgg", # squeeze 
-                       batch_size=8,
-                       use_aug_assuming_equal_img_shape=False)
+
+def load_lpips():
+    lpips_loss = LPIPSLoss(lpips_net="vgg", # squeeze 
+                           batch_size=8,
+                           use_aug_assuming_equal_img_shape=False)
+    return lpips_loss
 
 
 def create_callbacks(use_lpips=False, lpips_image=None, 
                      use_normal_dist=False, use_contrast=False,
                      lpips_frequency=10, contrast_frequency=10, 
                      lpips_lr=100, contrast_lr=100,
-                     normal_dist_lr=0.1): 
+                     normal_dist_lr=0.1, lpips_loss=None): 
     callbacks = []
     if use_lpips and lpips_image is not None:
+        if lpips_loss is None:
+            lpips_loss = load_lpips()
         lpips_callback = {"loss_function": LPIPSCallback(lpips_loss, 
                                                          lpips_image,
                                                          device="cuda"),
