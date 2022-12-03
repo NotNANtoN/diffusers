@@ -1,5 +1,4 @@
 CUDA_VISIBLE_DEVICES=0 TORCH_DISTRIBUTED_DEBUG="INFO" accelerate launch train_text_to_image.py \
->>>>>>> f7f1229319e9a559b5df22e031d00a1807a622eb
   --pretrained_model_name_or_path="runwayml/stable-diffusion-v1-5" \
   --train_data_dir_var_aspect="../../../finetune_SD/laion_aesthetics_2/"  \
   --train_batch_size=1 \
