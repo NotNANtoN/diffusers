@@ -1,6 +1,6 @@
 accelerate launch --mixed_precision="bf16" train_text_to_image.py \
-  --pretrained_model_name_or_path="sdv1-5-var-aspect-4" \
-  --train_data_dir_var_aspect="/hdd/data/finetune_SD/laion_aesthetics"  \
+  --pretrained_model_name_or_path="runwayml/stable-diffusion-v1-5" \
+  --train_data_dir_var_aspect="PATH_TO_DATA"  \
   --train_batch_size=4 \
   --gradient_accumulation_steps=16 \
   --gradient_checkpointing \
@@ -11,7 +11,7 @@ accelerate launch --mixed_precision="bf16" train_text_to_image.py \
   --output_dir="sdv1-5-var-aspect-1" \
   --use_8bit_adam \
   --mixed_precision="bf16" \
-  --max_files=1000 \
+  --max_files=2000 \
   --max_width=1024 \
   --max_height=768 \
   --hub_token="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"
