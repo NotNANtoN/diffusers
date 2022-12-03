@@ -364,6 +364,12 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, toke
 def main():
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
+    
+    # save args
+    import json
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, 'args.json'), 'w+', encoding='utf-8') as f:
+        json.dump(vars(args), f, ensure_ascii=False, indent=4)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
