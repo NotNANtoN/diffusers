@@ -1,4 +1,4 @@
-accelerate launch --mixed_precision="fp16" --num_processes=2 train_text_to_image.py \
+accelerate launch train_text_to_image.py \
   --pretrained_model_name_or_path="runwayml/stable-diffusion-v1-5" \
   --train_data_dir_var_aspect="../../../finetune_SD/laion_aesthetics_2/"  \
   --train_batch_size=1 \
@@ -12,10 +12,11 @@ accelerate launch --mixed_precision="fp16" --num_processes=2 train_text_to_image
   --use_8bit_adam \
   --mixed_precision="fp16" \
   --max_files=100 \
-  --max_width=128 \
+  --max_width=64 \
   --max_height=128 \
   --min_height=64 \
   --min_width=64 \
   --hub_token="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"
 
 #  --use_ema \
+# --mixed_precision="fp16" --num_processes=2 
