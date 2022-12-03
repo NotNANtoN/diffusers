@@ -1,3 +1,18 @@
+## Anton Notes
+
+1. Install requirements.txt
+2. Compile flash attention.
+3. Modify params in finetune_X.sh such as output_dir, train_batch_size. Put correct path to laion dataset in `train_data_dir_var_aspect`
+4. `bash finetune_X.sh`
+
+### Flash attention:
+```
+git clone https://github.com/HazyResearch/flash-attention.git \
+         && cd flash-attention \
+         && python3 setup.py install
+```
+
+
 # Stable Diffusion text-to-image fine-tuning
 
 The `train_text_to_image.py` script shows how to fine-tune stable diffusion model on your own dataset.
