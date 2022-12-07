@@ -39,6 +39,13 @@ def parse_args():
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
+        "--compile",
+        default=False,
+        action="store_true",
+        required=False,
+        help="Whether to use new torch.compile from PT 2.0",
+    )
+    parser.add_argument(
         "--dataset_name",
         type=str,
         default=None,
@@ -338,10 +345,17 @@ class EMAModel:
 
 @torch.inference_mode()
 def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, tokenizer, pretrained_path, weight_dtype):
+    # get state dict
     state_dict = unet.state_dict()
-    
+    # rename for multi-gpu
+    for key in state_dict:
+        if key.startswith("module."):
+            new_key = key.replace("module.", "")
+            state_dict[new_key] = state_dict[key]
+            del state_dict[key]
+    # create new model and load state dict into it
     unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
-    unet.load_state_dict(state_dict)
+    unet.load_state_dict(state_dict, strict=False)
     unet.to(weight_dtype)
     unet.eval()
     unet.to(accelerator.device)
@@ -481,13 +495,13 @@ def main():
             if os.path.exists(cache):
                 df = pd.read_parquet(cache)
             else:
-
-                df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=args.min_width, min_height=args.min_height, max_files=args.max_files)
-                df = assign_to_buckets(df, 
-                                       bucket_step_size=64, 
-                                       max_width=args.max_width, max_height=args.max_height,
-                                       min_bucket_count=64)
-                df.to_parquet(cache)
+                with accelerator.main_process_first():
+                    df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=args.min_width, min_height=args.min_height, max_files=args.max_files)
+                    df = assign_to_buckets(df, 
+                                           bucket_step_size=64, 
+                                           max_width=args.max_width, max_height=args.max_height,
+                                           min_bucket_count=64)
+                    df.to_parquet(cache)
 
             bucket_sampler = BucketSampler(df["bucket"], batch_size=args.train_batch_size) 
             train_dataset = BucketDataset(df, tokenizer)
@@ -607,6 +621,11 @@ def main():
     # as these models are only used for inference, keeping weights in full precision is not required.
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
+    
+    if args.compile:
+        unet = torch.compile(unet)
+        vae = torch.compile(vae)
+        text_encoder = torch.compile(text_encoder)
 
     # Create EMA for the unet.
     if args.use_ema:
@@ -651,7 +670,7 @@ def main():
             try:
                 with accelerator.accumulate(unet):
                     # Convert images to latent space
-                    print(batch["pixel_values"].shape)
+                    #print(batch["pixel_values"].shape)
                     latents = vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
                     latents = latents * 0.18215
 

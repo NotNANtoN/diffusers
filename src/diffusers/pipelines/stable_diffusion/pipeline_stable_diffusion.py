@@ -357,6 +357,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         if text_embeddings is None:
             text_embeddings = self.embed_prompts(prompt, weights=weights, device=device)
 
+        
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         bs_embed, seq_len, _ = text_embeddings.shape
         text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
@@ -544,8 +545,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
                 
 
+       
         # scale and decode the image latents with vae
-        image = self.decode_image(latents, output_type=output_type, device=device)
+        image = self.decode_image(latents.to(text_embeddings.dtype), output_type=output_type, device=device)
 
         if output_type == "pil" and use_safety:
             # run safety checker
@@ -616,7 +618,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         if image.shape[-1] == 3:
             image = image.permute(0, 3, 1, 2)
         # make it float tensor between 0 and 1
-        image = minmax(image).float()
+        image = minmax(image)
         # add noise
         if noise_strength_before_encode is not None and noise_strength_before_encode > 0:
             image = (1 - noise_strength_before_encode) * image + noise_strength_before_encode * torch.randn_like(image)
@@ -625,7 +627,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         # move to -1 to 1 for vae
         image = (image - 0.5) * 2
         # encode image
-        latents = self.vae.encode(image.to(torch_device).half()).latent_dist
+        latents = self.vae.encode(image.to(torch_device).to(self.vae.dtype)).latent_dist
         # encoded img is DiagonalGaussianDistribution, need to sample from it or we take the mean instead
         #latents = latents.sample()
         latents = latents.mean
@@ -635,7 +637,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
     
     def decode_image(self, latents, output_type="pil", device=None):
         if device is None:
-            device = "cpu"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         if output_type == "latent":
             return latents.detach().cpu()
         latents = latents / 0.18215
