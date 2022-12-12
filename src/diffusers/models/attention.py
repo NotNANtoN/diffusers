@@ -573,12 +573,9 @@ class CrossAttention(nn.Module):
 
         dim = query.shape[-1]
 
-        """
-        # commented out for flash attention
         query = self.reshape_heads_to_batch_dim(query)
         key = self.reshape_heads_to_batch_dim(key)
         value = self.reshape_heads_to_batch_dim(value)
-        """
 
         # TODO(PVP) - mask is currently never used. Remember to re-implement when used
 
@@ -622,7 +619,6 @@ class CrossAttention(nn.Module):
         # reshape hidden_states
         hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
         return hidden_states
-        
 
     def _sliced_attention(self, query, key, value, sequence_length, dim):
         batch_size_attention = query.shape[0]

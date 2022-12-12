@@ -607,7 +607,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
         # 0.0 set seed
-        self.set_seed(seed)
+        if seed is not None:
+            self.set_seed(seed)
         
         # 0. Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
@@ -645,7 +646,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         #    generator,
         #    latents,
         #)
-        latents, timesteps = self.encode_image(width, height, batch_size * num_images_per_prompt, generator, text_embeddings, device, start_img, noise, img2img_strength)
+        latents, timesteps = self.get_start_latents(width, height, batch_size * num_images_per_prompt, generator, text_embeddings, device, start_img, noise, img2img_strength, latents)
         
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -653,7 +654,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-        with self.progress_bar(total=num_inference_steps, disable= not verbose) as progress_bar:
+        self.set_progress_bar_config(disable=not verbose)
+        
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
@@ -695,7 +698,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
 
-    def encode_image(width, height, batch_size, generator, text_embeddings, device, start_img, noise, img2img_strength):    
+    def get_start_latents(self, width, height, batch_size, generator, text_embeddings, device, start_img, noise, img2img_strength, latents):    
         # get the initial random noise unless the user supplied it
 
         # Unlike in other pipelines, latents need to be generated in the target device
@@ -706,6 +709,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         if noise is None:
             noise = self.sample_noise(width, height, batch_size=batch_size, generator=generator, dtype=text_embeddings.dtype, device=device)
             
+        t_start = 0
         if latents is None:
             if start_img is None:
                 latents = noise
