@@ -12,8 +12,8 @@ from ...pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from ...schedulers import (
     DDIMScheduler,
     DPMSolverMultistepScheduler,
-    #EulerAncestralDiscreteScheduler,
-    #EulerDiscreteScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
@@ -55,8 +55,8 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
             DDIMScheduler,
             PNDMScheduler,
             LMSDiscreteScheduler,
-            #EulerDiscreteScheduler,
-            #EulerAncestralDiscreteScheduler,
+            EulerDiscreteScheduler,
+            EulerAncestralDiscreteScheduler,
             DPMSolverMultistepScheduler,
         ],
     ):
@@ -66,7 +66,7 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
     @torch.no_grad()
     def __call__(
         self,
-        image: Union[torch.Tensor, PIL.Image.Image],
+        image: Union[torch.Tensor, PIL.Image.Image] = None,
         batch_size: Optional[int] = 1,
         num_inference_steps: Optional[int] = 100,
         eta: Optional[float] = 0.0,
@@ -134,7 +134,7 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
         # set timesteps and move to the correct device
         self.scheduler.set_timesteps(num_inference_steps, device=self.device)
         timesteps_tensor = self.scheduler.timesteps
-        
+
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
 
@@ -146,7 +146,7 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
         extra_kwargs = {}
         if accepts_eta:
             extra_kwargs["eta"] = eta
-        
+
         for t in self.progress_bar(timesteps_tensor):
             # concat latents and low resolution image in the channel dimension.
             latents_input = torch.cat([latents, image], dim=1)
@@ -155,7 +155,7 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
             noise_pred = self.unet(latents_input, t).sample
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents, **extra_kwargs).prev_sample
-            
+
         # decode the image latents with the VQVAE
         image = self.vqvae.decode(latents).sample
         image = torch.clamp(image, -1.0, 1.0)

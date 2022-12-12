@@ -17,14 +17,18 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from datasets import load_dataset
-from diffusers import AutoencoderKL, DDPMScheduler, PNDMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DPMSolverMultistepScheduler
+from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DPMSolverMultistepScheduler
 from diffusers.optimization import get_scheduler
-from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
+from diffusers.utils import check_min_version
+from diffusers.utils.import_utils import is_xformers_available
 from huggingface_hub import HfFolder, Repository, whoami
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTokenizer
 
+
+# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
+check_min_version("0.10.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -44,6 +48,12 @@ def parse_args():
         action="store_true",
         required=False,
         help="Whether to use new torch.compile from PT 2.0",
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default=None,
+        required=False,
+        help="Revision of pretrained model identifier from huggingface.co/models.",
     )
     parser.add_argument(
         "--dataset_name",
@@ -344,7 +354,7 @@ class EMAModel:
 
 
 @torch.inference_mode()
-def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, tokenizer, pretrained_path, weight_dtype):
+def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pretrained_path, weight_dtype, revision):
     # get state dict
     state_dict = unet.state_dict()
     # rename for multi-gpu
@@ -364,13 +374,13 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, toke
         ema_unet.copy_to(unet.parameters())
 
     pipe = StableDiffusionPipeline(
+        pretrained_path,
         text_encoder=text_encoder,
         vae=vae,
         unet=unet,
-        tokenizer=tokenizer,
-        scheduler=DPMSolverMultistepScheduler.from_config(pretrained_path, subfolder="scheduler"),
         safety_checker=None,
         feature_extractor=None,
+        revision=revision,
     )
     return pipe
     
@@ -421,10 +431,33 @@ def main():
             os.makedirs(args.output_dir, exist_ok=True)
 
     # Load models and create wrapper for stable diffusion
-    tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
-    text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
-    unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
+    tokenizer = CLIPTokenizer.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
+    )
+    text_encoder = CLIPTextModel.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="text_encoder",
+        revision=args.revision,
+    )
+    vae = AutoencoderKL.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="vae",
+        revision=args.revision,
+    )
+    unet = UNet2DConditionModel.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="unet",
+        revision=args.revision,
+    )
+
+    if is_xformers_available():
+        try:
+            unet.enable_xformers_memory_efficient_attention()
+        except Exception as e:
+            logger.warning(
+                "Could not enable memory efficient attention. Make sure xformers is installed"
+                f" correctly and a GPU is available: {e}"
+            )
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
@@ -458,7 +491,7 @@ def main():
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
     )
-    noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     # Get the datasets: you can either provide your own training and evaluation files (see below)
     # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
@@ -667,44 +700,43 @@ def main():
         unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            try:
-                with accelerator.accumulate(unet):
-                    # Convert images to latent space
-                    #print(batch["pixel_values"].shape)
-                    latents = vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
-                    latents = latents * 0.18215
+            with accelerator.accumulate(unet):
+                # Convert images to latent space
+                latents = vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
+                latents = latents * 0.18215
 
-                    # Sample noise that we'll add to the latents
-                    noise = torch.randn_like(latents)
-                    bsz = latents.shape[0]
-                    # Sample a random timestep for each image
-                    timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
-                    timesteps = timesteps.long()
+                # Sample noise that we'll add to the latents
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+                # Sample a random timestep for each image
+                timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = timesteps.long()
 
-                    # Add noise to the latents according to the noise magnitude at each timestep
-                    # (this is the forward diffusion process)
-                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                # Add noise to the latents according to the noise magnitude at each timestep
+                # (this is the forward diffusion process)
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                    # Get the text embedding for conditioning
-                    encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                # Get the text embedding for conditioning
+                encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
-                    # Predict the noise residual and compute loss
-                    noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
-                    loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                # Get the target for loss depending on the prediction type
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                    # Gather the losses across all processes for logging (if we use distributed training).
-                    avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
-                    train_loss += avg_loss.item() / args.gradient_accumulation_steps
+                # Predict the noise residual and compute loss
+                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
-                    # Backpropagate
-                    accelerator.backward(loss)
-                    if accelerator.sync_gradients:
-                        accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad()
+                # Gather the losses across all processes for logging (if we use distributed training).
+                avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
+                train_loss += avg_loss.item() / args.gradient_accumulation_steps
 
-                # Checks if the accelerator has performed an optimization step behind the scenes
+                # Backpropagate
+                accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     if args.use_ema:
                         ema_unet.step(unet.parameters())
@@ -727,13 +759,13 @@ def main():
                 if step % eval_every == 0:
                     gen_dir = os.path.join(args.output_dir, "generations", f"{global_step}")
                     os.makedirs(gen_dir, exist_ok=True)
-
+        
                     pipe = models_to_pipe(accelerator, args.use_ema,
                                           unet, ema_unet, 
-                                          text_encoder, vae, 
-                                          tokenizer, 
+                                          text_encoder, vae,  
                                           args.pretrained_model_name_or_path,
-                                          weight_dtype)
+                                          weight_dtype,
+                                          args.revision)
 
 
                     prompts = ["full body portrait of Dilraba, slight smile, diffuse natural sun lights, autumn lights, highly detailed, digital painting, artstation, concept art, sharp focus, illustration",
@@ -771,12 +803,12 @@ def main():
     if accelerator.is_main_process:
         pipe = models_to_pipe(accelerator, args.use_ema,
                                           unet, ema_unet, 
-                                          text_encoder, vae, 
-                                          tokenizer, 
+                                          text_encoder, vae,  
                                           args.pretrained_model_name_or_path,
-                                          weight_dtype)
-
+                                          weight_dtype,
+                                          args.revision)
         pipe.save_pretrained(args.output_dir)
+
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)

@@ -20,7 +20,12 @@ import jax.numpy as jnp
 from scipy import integrate
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from .scheduling_utils_flax import FlaxSchedulerMixin, FlaxSchedulerOutput
+from .scheduling_utils_flax import (
+    _FLAX_COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS,
+    FlaxSchedulerMixin,
+    FlaxSchedulerOutput,
+    broadcast_to_shape_from_left,
+)
 
 
 @flax.struct.dataclass
@@ -49,8 +54,8 @@ class FlaxLMSDiscreteScheduler(FlaxSchedulerMixin, ConfigMixin):
 
     [`~ConfigMixin`] takes care of storing all config attributes that are passed in the scheduler's `__init__`
     function, such as `num_train_timesteps`. They can be accessed via `scheduler.config.num_train_timesteps`.
-    [`~ConfigMixin`] also provides general loading and saving functionality via the [`~ConfigMixin.save_config`] and
-    [`~ConfigMixin.from_config`] functions.
+    [`SchedulerMixin`] provides general loading and saving functionality via the [`SchedulerMixin.save_pretrained`] and
+    [`~SchedulerMixin.from_pretrained`] functions.
 
     Args:
         num_train_timesteps (`int`): number of diffusion steps used to train the model.
@@ -62,6 +67,12 @@ class FlaxLMSDiscreteScheduler(FlaxSchedulerMixin, ConfigMixin):
         trained_betas (`jnp.ndarray`, optional):
             option to pass an array of betas directly to the constructor to bypass `beta_start`, `beta_end` etc.
     """
+
+    _compatibles = _FLAX_COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS.copy()
+
+    @property
+    def has_state(self):
+        return True
 
     @register_to_config
     def __init__(
@@ -85,9 +96,31 @@ class FlaxLMSDiscreteScheduler(FlaxSchedulerMixin, ConfigMixin):
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = jnp.cumprod(self.alphas, axis=0)
 
+    def create_state(self):
         self.state = LMSDiscreteSchedulerState.create(
-            num_train_timesteps=num_train_timesteps, sigmas=((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5
+            num_train_timesteps=self.config.num_train_timesteps,
+            sigmas=((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5,
         )
+
+    def scale_model_input(self, state: LMSDiscreteSchedulerState, sample: jnp.ndarray, timestep: int) -> jnp.ndarray:
+        """
+        Scales the denoising model input by `(sigma**2 + 1) ** 0.5` to match the K-LMS algorithm.
+
+        Args:
+            state (`LMSDiscreteSchedulerState`):
+                the `FlaxLMSDiscreteScheduler` state data class instance.
+            sample (`jnp.ndarray`):
+                current instance of sample being created by diffusion process.
+            timestep (`int`):
+                current discrete timestep in the diffusion chain.
+
+        Returns:
+            `jnp.ndarray`: scaled input sample
+        """
+        (step_index,) = jnp.where(state.timesteps == timestep, size=1)
+        sigma = state.sigmas[step_index]
+        sample = sample / ((sigma**2 + 1) ** 0.5)
+        return sample
 
     def get_lms_coefficient(self, state, order, t, current_order):
         """
@@ -112,7 +145,7 @@ class FlaxLMSDiscreteScheduler(FlaxSchedulerMixin, ConfigMixin):
         return integrated_coeff
 
     def set_timesteps(
-        self, state: LMSDiscreteSchedulerState, num_inference_steps: int, shape: Tuple
+        self, state: LMSDiscreteSchedulerState, num_inference_steps: int, shape: Tuple = ()
     ) -> LMSDiscreteSchedulerState:
         """
         Sets the timesteps used for the diffusion chain. Supporting function to be run before inference.
@@ -173,9 +206,9 @@ class FlaxLMSDiscreteScheduler(FlaxSchedulerMixin, ConfigMixin):
 
         # 2. Convert to an ODE derivative
         derivative = (sample - pred_original_sample) / sigma
-        state = state.replace(derivatives=state.derivatives.append(derivative))
+        state = state.replace(derivatives=jnp.append(state.derivatives, derivative))
         if len(state.derivatives) > order:
-            state = state.replace(derivatives=state.derivatives.pop(0))
+            state = state.replace(derivatives=jnp.delete(state.derivatives, 0))
 
         # 3. Compute linear multistep coefficients
         order = min(timestep + 1, order)
@@ -199,8 +232,7 @@ class FlaxLMSDiscreteScheduler(FlaxSchedulerMixin, ConfigMixin):
         timesteps: jnp.ndarray,
     ) -> jnp.ndarray:
         sigma = state.sigmas[timesteps].flatten()
-        while len(sigma.shape) < len(noise.shape):
-            sigma = sigma[..., None]
+        sigma = broadcast_to_shape_from_left(sigma, noise.shape)
 
         noisy_samples = original_samples + noise * sigma
 
