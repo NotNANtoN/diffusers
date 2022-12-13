@@ -354,7 +354,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 return torch.device(module._hf_hook.execution_device)
         return self.device
 
-    def _encode_prompt(self, prompt, text_embeddings, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt):
+    def _encode_prompt(self, prompt, text_embeddings=None, device="cuda", num_images_per_prompt=1, do_classifier_free_guidance=False, negative_prompt=""):
         r"""
         Encodes the prompt into text encoder hidden states.
 
@@ -412,11 +412,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
             uncond_tokens: List[str]
             if negative_prompt is None:
                 uncond_tokens = [""] * batch_size
-            elif type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
             elif isinstance(negative_prompt, str):
                 uncond_tokens = [negative_prompt]
             elif batch_size != len(negative_prompt):
@@ -428,11 +423,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
             else:
                 uncond_tokens = negative_prompt
 
-            max_length = text_input_ids.shape[-1]
             uncond_input = self.tokenizer(
                 uncond_tokens,
                 padding="max_length",
-                max_length=max_length,
+                max_length=self.tokenizer.model_max_length,
                 truncation=True,
                 return_tensors="pt",
             )
@@ -474,7 +468,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         image = self.vae.decode(latents).sample
         image = (image / 2 + 0.5).clamp(0, 1)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
-        image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+        image = image.cpu().float()
         return image
 
     def prepare_extra_step_kwargs(self, generator, eta):
@@ -495,8 +489,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
         return extra_step_kwargs
 
     def check_inputs(self, prompt, height, width, callback_steps):
-        if not isinstance(prompt, str) and not isinstance(prompt, list):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+        #if not isinstance(prompt, str) and not isinstance(prompt, list):
+        #    raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
@@ -618,7 +612,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
         self.check_inputs(prompt, height, width, callback_steps)
 
         # 2. Define call parameters
-        batch_size = 1 if isinstance(prompt, str) else len(prompt)
+        if prompt is None:
+            batch_size = len(text_embeddings)
+        else:
+            batch_size = 1 if isinstance(prompt, str) else len(prompt)
         device = self._execution_device
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -646,7 +643,12 @@ class StableDiffusionPipeline(DiffusionPipeline):
         #    generator,
         #    latents,
         #)
-        latents, timesteps = self.get_start_latents(width, height, batch_size * num_images_per_prompt, generator, text_embeddings, device, start_img, noise, img2img_strength, latents)
+        latents, timesteps = self.get_start_latents(width, height, 
+                                                    batch_size * num_images_per_prompt, 
+                                                    generator, text_embeddings, device, 
+                                                    start_img, noise, img2img_strength, 
+                                                    latents, num_inference_steps
+                                                   )
         
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -691,14 +693,22 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         # 10. Convert to PIL
         if output_type == "pil":
+            image = image.permute(0, 2, 3, 1).numpy()
             image = self.numpy_to_pil(image)
+        elif output_type == "numpy":
+            image = image.permute(0, 2, 3, 1).numpy()
 
         if not return_dict:
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
 
-    def get_start_latents(self, width, height, batch_size, generator, text_embeddings, device, start_img, noise, img2img_strength, latents):    
+    def get_start_latents(self, width, height, 
+                          batch_size, generator, 
+                          text_embeddings, device, 
+                          start_img, noise, 
+                          img2img_strength, latents, 
+                          num_inference_steps):    
         # get the initial random noise unless the user supplied it
 
         # Unlike in other pipelines, latents need to be generated in the target device
@@ -737,18 +747,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     t_start = num_inference_steps - init_timestep
                     
                     timesteps = self.scheduler.timesteps[t_start]
-                    timesteps = torch.tensor([timesteps] * batch_size * num_images_per_prompt, device=device)
+                    timesteps = torch.tensor([timesteps] * batch_size, device=device)
                     # add noise to latents using the timesteps       
                     latents = self.scheduler.add_noise(latents, noise, timesteps)
-                    
-                    if multiply_latent_by_sigma and isinstance(self.scheduler, LMSDiscreteScheduler):
-                        # scale the initial noise by the standard deviation required by the scheduler
-                        #latents = latents * self.scheduler.init_noise_sigma
-                        latents = latents * ((self.scheduler.sigmas[t_start]**2 + 1) ** 0.5)          
-
-        # Some schedulers like PNDM have timesteps as arrays
-        # It's more optimized to move all timesteps to correct device beforehand
-        timesteps_tensor = self.scheduler.timesteps[t_start:]#.to(device)
+        timesteps_tensor = self.scheduler.timesteps[t_start:].to(device)
         return latents, timesteps_tensor
     
     def sample_noise(self, width=512, height=512, batch_size=1, generator=None, dtype=None, device="cpu"):
