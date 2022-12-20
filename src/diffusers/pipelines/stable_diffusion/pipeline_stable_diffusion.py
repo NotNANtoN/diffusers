@@ -20,6 +20,8 @@ import random
 import torch
 import numpy as np
 from tqdm.auto import tqdm
+from PIL import Image
+import PIL
 
 from diffusers.utils import is_accelerate_available
 from packaging import version
@@ -42,6 +44,25 @@ from .safety_checker import StableDiffusionSafetyChecker
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+def preprocess_mask(mask: PIL.Image.Image, scale_factor: int = 8) -> torch.Tensor:
+    """
+    Preprocess a mask for the model.
+    """
+    mask = mask.convert("L")
+    w, h = mask.size
+    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+    mask = mask.resize(
+        (w // scale_factor, h // scale_factor), resample=PIL.Image.NEAREST
+    )
+    mask = np.array(mask).astype(np.float32) / 255.0
+    mask = np.tile(mask, (4, 1, 1))
+    mask = mask[None].transpose(0, 1, 2, 3)  # what does this step do?
+    mask = 1 - mask  # repaint white, keep black
+    mask = torch.from_numpy(mask)
+
+    return mask
 
 
 def dynamic_thresholding_(img, quantile):
@@ -545,6 +566,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         verbose=True,
         noise: Optional[torch.Tensor] = None,
         loss_callbacks: Optional[List] = None,
+        mask_img: Optional = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -643,12 +665,21 @@ class StableDiffusionPipeline(DiffusionPipeline):
         #    generator,
         #    latents,
         #)
-        latents, timesteps = self.get_start_latents(width, height, 
+        latents, init_latents, timesteps, noise = self.get_start_latents(width, height, 
                                                     batch_size * num_images_per_prompt, 
                                                     generator, text_embeddings, device, 
                                                     start_img, noise, img2img_strength, 
                                                     latents, num_inference_steps
                                                    )
+        
+        # 5.5 prepare mask
+        # Prepare mask latent
+        if mask_img:
+            vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+            mask_img = preprocess_mask(mask_img, scale_factor=vae_scale_factor)
+            mask = mask_img.to(device=self.device, dtype=latents.dtype)
+        else:
+            mask = None
         
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -657,6 +688,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self.set_progress_bar_config(disable=not verbose)
+        
         
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -684,9 +716,15 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
+                   
+                # mask latents
+                if mask is not None:
+                    init_latents_proper = self.scheduler.add_noise(init_latents, noise, torch.tensor([t]))
+                    # import ipdb; ipdb.set_trace()
+                    latents = (init_latents_proper * mask) + (latents * (1 - mask)) 
 
         # 8. Post-processing
-        image = self.decode_latents(latents)
+        image = self.decode_latents(latents.to(text_embeddings.dtype))
 
         # 9. Run safety checker
         image, has_nsfw_concept = self.run_safety_checker(image, device, text_embeddings.dtype)
@@ -720,12 +758,14 @@ class StableDiffusionPipeline(DiffusionPipeline):
             noise = self.sample_noise(width, height, batch_size=batch_size, generator=generator, dtype=text_embeddings.dtype, device=device)
             
         t_start = 0
+        init_latents = latents
         if latents is None:
             if start_img is None:
                 latents = noise
                 # if we use LMSDiscreteScheduler, let's make sure latents are mulitplied by sigmas
                 if isinstance(self.scheduler, LMSDiscreteScheduler):
                     latents = latents * self.scheduler.init_noise_sigma#((self.scheduler.sigmas[t_start]**2 + 1) ** 0.5)  
+                init_latents = latents
                 
             else:
                 # encode start img with vae
@@ -734,6 +774,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     latents = start_img
                 else:
                     latents = self.encode_image(start_img)
+                    
+                init_latents = latents
                 
                 # add noise
                 if img2img_strength is not None and img2img_strength != 0:
@@ -748,10 +790,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     
                     timesteps = self.scheduler.timesteps[t_start]
                     timesteps = torch.tensor([timesteps] * batch_size, device=device)
-                    # add noise to latents using the timesteps       
+                    # add noise to latents using the timesteps      
                     latents = self.scheduler.add_noise(latents, noise, timesteps)
         timesteps_tensor = self.scheduler.timesteps[t_start:].to(device)
-        return latents, timesteps_tensor
+        return latents, init_latents, timesteps_tensor, noise
     
     def sample_noise(self, width=512, height=512, batch_size=1, generator=None, dtype=None, device="cpu"):
         latents = torch.randn(batch_size, self.in_channels,
