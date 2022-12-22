@@ -250,6 +250,15 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 self.vae_ait_exe = self.init_ait_module(
                     model_name="AutoencoderKL", workdir=self.compile_dir
                 )
+                
+    def to(self, device, *args, **kwargs):
+        super().to(device, *args, **kwargs)
+        # atm we cannot move compiled models to CPU unfortunately :( 
+        #if hasattr(self, "clip_ait_exe"):
+        #    self.clip_ait_exe.to(device, *args, **kwargs)
+        #    self.unet_ait_exe.to(device, *args, **kwargs)
+        #    self.vae_ait_exe.to(device, *args, **kwargs)
+        return self
             
     def del_pt_models(self):
         # delete models. keep vae for encoding
