@@ -25,7 +25,7 @@ import PIL
 
 from diffusers.utils import is_accelerate_available
 from packaging import version
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer, DPTForDepthEstimation
 
 from ...configuration_utils import FrozenDict
 from ...models import AutoencoderKL, UNet2DConditionModel
@@ -134,6 +134,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             DPMSolverMultistepScheduler,
         ],
         safety_checker: StableDiffusionSafetyChecker,
+        depth_estimator: DPTForDepthEstimation,
         feature_extractor: CLIPFeatureExtractor,
         requires_safety_checker: bool = True,
     ):
@@ -211,6 +212,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
+            depth_estimator=depth_estimator,
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
@@ -357,7 +359,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         device = torch.device(f"cuda:{gpu_id}")
 
-        for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae]:
+        for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae, self.depth_estimator]:
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
 
@@ -569,6 +571,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         
+        depth_map: Optional[torch.FloatTensor] = None,
         start_img: Optional[torch.Tensor] = None,
         img2img_strength: Optional[float] = None,
         seed=None,
@@ -657,23 +660,24 @@ class StableDiffusionPipeline(DiffusionPipeline):
         text_embeddings = self._encode_prompt(
             prompt, text_embeddings, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt
         )
+        
+        # 4. Prepare depth mask
+        depth_mask = self.prepare_depth_map(
+            width,
+            height,
+            image,
+            depth_map,
+            batch_size * num_images_per_prompt,
+            do_classifier_free_guidance,
+            text_embeddings.dtype,
+            device,
+        )
 
-        # 4. Prepare timesteps
+        # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # 5. Prepare latent variables
-        #num_channels_latents = self.unet.in_channels
-        #latents = self.prepare_latents(
-        #    batch_size * num_images_per_prompt,
-        #    num_channels_latents,
-        #    height,
-        #    width,
-        #    text_embeddings.dtype,
-        #    device,
-        #    generator,
-        #    latents,
-        #)
+        # 6. Prepare latent variables
         latents, init_latents, timesteps, noise = self.get_start_latents(width, height, 
                                                     batch_size * num_images_per_prompt, 
                                                     generator, text_embeddings, device, 
@@ -681,7 +685,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                                                     latents, num_inference_steps
                                                    )
         
-        # 5.5 prepare mask
+        # 7 prepare mask
         # Prepare mask latent
         if mask_img:
             vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
@@ -691,10 +695,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
             mask = None
         
 
-        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        # 8. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
-        # 7. Denoising loop
+        # 9. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self.set_progress_bar_config(disable=not verbose)
         
@@ -704,6 +708,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                if depth_mask is not None:
+                    latent_model_input = torch.cat([latent_model_input, depth_mask], dim=1)
 
                 # predict the noise residual
                 if self.compile_dir is None:
@@ -732,13 +738,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     # import ipdb; ipdb.set_trace()
                     latents = (init_latents_proper * mask) + (latents * (1 - mask)) 
 
-        # 8. Post-processing
+        # 10. Post-processing
         image = self.decode_latents(latents.to(text_embeddings.dtype))
 
-        # 9. Run safety checker
+        # 11. Run safety checker
         image, has_nsfw_concept = self.run_safety_checker(image, device, text_embeddings.dtype)
 
-        # 10. Convert to PIL
+        # 12. Convert to PIL
         if output_type == "pil":
             image = image.permute(0, 2, 3, 1).numpy()
             image = self.numpy_to_pil(image)
@@ -895,6 +901,50 @@ class StableDiffusionPipeline(DiffusionPipeline):
         elif output_type == "numpy":
             image = image.permute(0, 2, 3, 1).numpy()
         return image
+    
+    def prepare_depth_map(self, width, height, image, depth_map, batch_size, do_classifier_free_guidance, dtype, device):
+        if image is None and depth_map is None:
+            return None
+        
+        if isinstance(image, PIL.Image.Image):
+            width, height = image.size
+            width, height = map(lambda dim: dim - dim % 32, (width, height))  # resize to integer multiple of 32
+            image = image.resize((width, height), resample=PIL_INTERPOLATION["lanczos"])
+            #width, height = image.size
+        else:
+            image = [img for img in image]
+            #width, height = image[0].shape[-2:]
+
+        if depth_map is None:
+            pixel_values = self.feature_extractor(images=image, return_tensors="pt").pixel_values
+            pixel_values = pixel_values.to(device=device)
+            
+            # The DPT-Hybrid model uses batch-norm layers which are not compatible with fp16.
+            # So we use `torch.autocast` here for half precision inference.
+            cast_dtype = torch.float16 if dtype == torch.bfloat16 else dtype
+            context_manger = torch.autocast("cuda", dtype=cast_dtype) if device.type == "cuda" else contextlib.nullcontext()
+            with context_manger:
+                depth_map = self.depth_estimator(pixel_values).predicted_depth            
+
+        depth_map = torch.nn.functional.interpolate(
+            depth_map.unsqueeze(1),
+            size=(height // self.vae_scale_factor, width // self.vae_scale_factor),
+            mode="bicubic",
+            align_corners=False,
+        )
+
+        depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
+        depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
+        depth_map = 2.0 * (depth_map - depth_min) / (depth_max - depth_min) - 1.0
+        depth_map = depth_map.to(dtype)
+
+        # duplicate mask and masked_image_latents for each generation per prompt, using mps friendly method
+        if depth_map.shape[0] < batch_size:
+            depth_map = depth_map.repeat(batch_size, 1, 1, 1)
+
+        depth_map = torch.cat([depth_map] * 2) if do_classifier_free_guidance else depth_map
+        depth_map = depth_map.to(device=device, dtype=dtype)
+        return depth_map
     
     def set_seed(self, seed):
         torch.manual_seed(seed)
