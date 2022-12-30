@@ -1,10 +1,10 @@
 accelerate launch --mixed_precision="bf16" train_text_to_image.py \
   --pretrained_model_name_or_path="runwayml/stable-diffusion-v1-5" \
   --train_data_dir_var_aspect="PATH_TO_DATA"  \
-  --train_batch_size=4 \
-  --gradient_accumulation_steps=16 \
+  --train_batch_size=8 \
+  --gradient_accumulation_steps=32 \
   --gradient_checkpointing \
-  --max_train_steps=10001 \
+  --max_train_steps=20001 \
   --learning_rate=1e-06 \
   --max_grad_norm=1 \
   --lr_scheduler="constant_with_warmup" --lr_warmup_steps=500 \

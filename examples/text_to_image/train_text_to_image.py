@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+import wandb
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -48,6 +49,7 @@ def parse_args():
         action="store_true",
         required=False,
         help="Whether to use new torch.compile from PT 2.0",
+    )
     parser.add_argument(
         "--revision",
         type=str,
@@ -357,35 +359,46 @@ class EMAModel:
 def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pretrained_path, weight_dtype, revision):
     # get state dict
     state_dict = unet.state_dict()
+    #print(unet.conv_in.bias[:5])
     # rename for multi-gpu
+    new_state_dict = {}
     for key in state_dict:
         if key.startswith("module."):
-            new_key = key.replace("module.", "")
-            state_dict[new_key] = state_dict[key]
-            del state_dict[key]
+            key = key.replace("module.", "")
+        new_state_dict[key] = state_dict[key].clone()
+    del state_dict
     # create new model and load state dict into it
-    unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
-    unet.load_state_dict(state_dict, strict=False)
-    unet.to(weight_dtype)
-    unet.eval()
-    unet.to(accelerator.device)
+    new_unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
+    new_unet.to(weight_dtype)
+    new_unet.load_state_dict(new_state_dict, strict=True)
+    new_unet.eval()
+    new_unet.to(accelerator.device)
+
     
     if use_ema:
-        ema_unet.copy_to(unet.parameters())
+        ema_unet.copy_to(new_unet.parameters())
+    
+    tokenizer = CLIPTokenizer.from_pretrained(pretrained_path, subfolder="tokenizer", revision=revision)
+    scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_path, subfolder="scheduler", revision=revision)
 
     pipe = StableDiffusionPipeline(
-        pretrained_path,
         text_encoder=text_encoder,
         vae=vae,
-        unet=unet,
+        unet=new_unet,
+        tokenizer=tokenizer,
+        scheduler=scheduler,
         safety_checker=None,
-        feature_extractor=None,
-        revision=revision,
+        feature_extractor=None,     
+        requires_safety_checker=False,
     )
+    
     return pipe
     
     
 def main():
+    # wandb init
+    run = wandb.init(entity="finetuners")
+    
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
     
@@ -688,13 +701,15 @@ def main():
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-
+    logger.info(f"  Learning rate at start = {args.learning_rate}")
+    
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
     global_step = 0
     
-    eval_every = 100 * args.gradient_accumulation_steps
+    eval_every = 200 * args.gradient_accumulation_steps
+    save_every = 1000 * args.gradient_accumulation_steps
 
     for epoch in range(args.num_train_epochs):
         unet.train()
@@ -738,6 +753,12 @@ def main():
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                    
+                if accelerator.sync_gradients:
                     if args.use_ema:
                         ema_unet.step(unet.parameters())
                     progress_bar.update(1)
@@ -750,9 +771,6 @@ def main():
 
                 if global_step >= args.max_train_steps:
                     break
-            except KeyboardInterrupt:
-                print("Keyboardinterrupt detected - stopping training and saving the model")
-                break
                 
             # evaluate model regularly
             if accelerator.is_local_main_process:
@@ -776,7 +794,6 @@ def main():
                                "Jesus taking a selfie, instagram, high detail, glamorous photograph, natural lighting",
                               ]
 
-                    import wandb
                     out_dict = {}
                     
                     if args.max_width > 256:
@@ -797,23 +814,40 @@ def main():
 
                     wandb.log(out_dict)
                     del pipe
-            
-    # Create the pipeline using the trained modules and save it.
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        pipe = models_to_pipe(accelerator, args.use_ema,
+        
+                if step > 5 and step % save_every == 0:
+                    pipe = models_to_pipe(accelerator, args.use_ema,
                                           unet, ema_unet, 
                                           text_encoder, vae,  
                                           args.pretrained_model_name_or_path,
                                           weight_dtype,
                                           args.revision)
-        pipe.save_pretrained(args.output_dir)
+                    save_folder = os.path.join(args.output_dir, f"model_at_{global_step}")
+                    os.makedirs(save_folder, exist_ok=True)
+                    pipe.save_pretrained(save_folder)
+                    del pipe
+                    
+        
+            
+    # Create the pipeline using the trained modules and save it.
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        pipe = models_to_pipe(accelerator, args.use_ema,
+                              unet, ema_unet, 
+                              text_encoder, vae,  
+                              args.pretrained_model_name_or_path,
+                              weight_dtype,
+                              args.revision)
+        save_folder = os.path.join(args.output_dir, f"final_model_at_{global_step}")
+        os.makedirs(save_folder, exist_ok=True)
+        pipe.save_pretrained(save_folder)
 
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
 
     accelerator.end_training()
+    run.finish()
 
 
 if __name__ == "__main__":
