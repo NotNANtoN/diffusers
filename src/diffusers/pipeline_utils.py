@@ -573,7 +573,7 @@ class DiffusionPipeline(ConfigMixin):
         # define init kwargs
         init_kwargs = {k: init_dict.pop(k) for k in optional_kwargs if k in init_dict}
         init_kwargs = {**init_kwargs, **passed_pipe_kwargs}
-        # add optional models that are list of length two back to init dict
+        # add optional models that are a list of length 2 back to init dict
         for k, v in list(init_kwargs.items())[:]:
             if isinstance(v, list) and len(v) == 2:
                 init_dict[k] = init_kwargs.pop(k)
@@ -723,6 +723,9 @@ class DiffusionPipeline(ConfigMixin):
 
                 # check if the module is in a subdirectory
                 if os.path.isdir(os.path.join(cached_folder, name)):
+                    print(os.path.join(cached_folder, name))
+                    print(load_method)
+                    print(loading_kwargs)
                     loaded_sub_model = load_method(os.path.join(cached_folder, name), **loading_kwargs)
                 else:
                     # else load from the root directory

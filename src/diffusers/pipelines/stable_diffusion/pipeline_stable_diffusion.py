@@ -205,9 +205,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
             unet._internal_dict = FrozenDict(new_config)
 
         extra_modules = {}
-        if depth_estimator is not None:
-            print("Add depth estimator!")
-            extra_modules["depth_estimator"] = depth_estimator
+        #if depth_estimator is not None:
+        extra_modules["depth_estimator"] = depth_estimator
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
