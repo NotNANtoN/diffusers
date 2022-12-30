@@ -24,7 +24,11 @@ import numpy as np
 
 from huggingface_hub import hf_hub_download
 
+<<<<<<< HEAD:src/diffusers/onnx_utils.py
 from .utils import ONNX_EXTERNAL_WEIGHTS_NAME, ONNX_WEIGHTS_NAME, is_onnx_available, logging
+=======
+from ..utils import ONNX_EXTERNAL_WEIGHTS_NAME, ONNX_WEIGHTS_NAME, is_onnx_available, logging
+>>>>>>> upstream/main:src/diffusers/pipelines/onnx_utils.py
 
 
 if is_onnx_available():

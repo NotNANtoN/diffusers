@@ -4,6 +4,21 @@
 from ..utils import DummyObject, requires_backends
 
 
+class AutoencoderKL(metaclass=DummyObject):
+    _backends = ["torch"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_config(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+
 class ModelMixin(metaclass=DummyObject):
     _backends = ["torch"]
 
@@ -19,7 +34,37 @@ class ModelMixin(metaclass=DummyObject):
         requires_backends(cls, ["torch"])
 
 
-class AutoencoderKL(metaclass=DummyObject):
+class PriorTransformer(metaclass=DummyObject):
+    _backends = ["torch"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_config(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+
+class Transformer2DModel(metaclass=DummyObject):
+    _backends = ["torch"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_config(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+
+class UNet1DModel(metaclass=DummyObject):
     _backends = ["torch"]
 
     def __init__(self, *args, **kwargs):
@@ -137,7 +182,22 @@ def get_scheduler(*args, **kwargs):
     requires_backends(get_scheduler, ["torch"])
 
 
-class DiffusionPipeline(metaclass=DummyObject):
+class AudioPipelineOutput(metaclass=DummyObject):
+    _backends = ["torch"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_config(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+
+class DanceDiffusionPipeline(metaclass=DummyObject):
     _backends = ["torch"]
 
     def __init__(self, *args, **kwargs):
@@ -183,6 +243,36 @@ class DDIMPipeline(metaclass=DummyObject):
 
 
 class DDPMPipeline(metaclass=DummyObject):
+    _backends = ["torch"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_config(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+
+class DiffusionPipeline(metaclass=DummyObject):
+    _backends = ["torch"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_config(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+
+class ImagePipelineOutput(metaclass=DummyObject):
     _backends = ["torch"]
 
     def __init__(self, *args, **kwargs):
@@ -512,6 +602,24 @@ class ScoreSdeVeScheduler(metaclass=DummyObject):
         requires_backends(cls, ["torch"])
 
 
+<<<<<<< HEAD
+=======
+class UnCLIPScheduler(metaclass=DummyObject):
+    _backends = ["torch"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_config(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+
+>>>>>>> upstream/main
 class VQDiffusionScheduler(metaclass=DummyObject):
     _backends = ["torch"]
 

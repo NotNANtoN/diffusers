@@ -8,10 +8,17 @@ import PIL
 from transformers import CLIPFeatureExtractor, CLIPTokenizer
 
 from ...configuration_utils import FrozenDict
+<<<<<<< HEAD
 from ...onnx_utils import OnnxRuntimeModel
 from ...pipeline_utils import DiffusionPipeline
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from ...utils import deprecate, logging
+=======
+from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from ...utils import deprecate, logging
+from ..onnx_utils import OnnxRuntimeModel
+from ..pipeline_utils import DiffusionPipeline
+>>>>>>> upstream/main
 from . import StableDiffusionPipelineOutput
 
 
@@ -303,7 +310,11 @@ class OnnxStableDiffusionInpaintPipelineLegacy(DiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
         message = "Please use `image` instead of `init_image`."
+<<<<<<< HEAD
         init_image = deprecate("init_image", "0.12.0", message, take_from=kwargs)
+=======
+        init_image = deprecate("init_image", "0.13.0", message, take_from=kwargs)
+>>>>>>> upstream/main
         image = init_image or image
 
         if isinstance(prompt, str):

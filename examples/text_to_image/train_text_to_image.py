@@ -5,20 +5,17 @@ import os
 import random
 from pathlib import Path
 from typing import Iterable, Optional
-import sys
-sys.path.append("../../src")
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-import wandb
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from datasets import load_dataset
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DPMSolverMultistepScheduler
+from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
@@ -44,13 +41,6 @@ def parse_args():
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
-        "--compile",
-        default=False,
-        action="store_true",
-        required=False,
-        help="Whether to use new torch.compile from PT 2.0",
-    )
-    parser.add_argument(
         "--revision",
         type=str,
         default=None,
@@ -74,36 +64,6 @@ def parse_args():
         help="The config of the Dataset, leave as None if there's only one config.",
     )
     parser.add_argument(
-        "--max_files",
-        type=int,
-        default=10,
-        help="Number of parquet files that are opened and used to train for train_data_dir_var_aspect (each contains 10k images).",
-    )
-    parser.add_argument(
-        "--max_width",
-        type=int,
-        default=768,
-        help="Max width for train images",
-    )
-    parser.add_argument(
-        "--max_height",
-        type=int,
-        default=768,
-        help="Max height for train imges",
-    )
-    parser.add_argument(
-        "--min_width",
-        type=int,
-        default=128,
-        help="Max width for train images",
-    )
-    parser.add_argument(
-        "--min_height",
-        type=int,
-        default=128,
-        help="Max height for train imges",
-    )
-    parser.add_argument(
         "--train_data_dir",
         type=str,
         default=None,
@@ -111,14 +71,6 @@ def parse_args():
             "A folder containing the training data. Folder contents must follow the structure described in"
             " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
             " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
-        ),
-    )
-    parser.add_argument(
-        "--train_data_dir_var_aspect",
-        type=str,
-        default=None,
-        help=(
-            "A folder containing the training data, with variable aspect ratios"
         ),
     )
     parser.add_argument(
@@ -256,7 +208,7 @@ def parse_args():
     parser.add_argument(
         "--report_to",
         type=str,
-        default="wandb",
+        default="tensorboard",
         help=(
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`,'
             ' `"wandb"` and `"comet_ml"`. Use `"all"` (default) to report to all integrations.'
@@ -264,6 +216,27 @@ def parse_args():
         ),
     )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    parser.add_argument(
+        "--checkpointing_steps",
+        type=int,
+        default=500,
+        help=(
+            "Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"
+            " training using `--resume_from_checkpoint`."
+        ),
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
+            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
+        ),
+    )
+    parser.add_argument(
+        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -271,7 +244,7 @@ def parse_args():
         args.local_rank = env_local_rank
 
     # Sanity checks
-    if args.dataset_name is None and args.train_data_dir is None and args.train_data_dir_var_aspect is None:
+    if args.dataset_name is None and args.train_data_dir is None:
         raise ValueError("Need either a dataset name or a training folder.")
 
     return args
@@ -305,24 +278,19 @@ class EMAModel:
         self.decay = decay
         self.optimization_step = 0
 
-    def get_decay(self, optimization_step):
-        """
-        Compute the decay factor for the exponential moving average.
-        """
-        value = (1 + optimization_step) / (10 + optimization_step)
-        return 1 - min(self.decay, value)
-
     @torch.no_grad()
     def step(self, parameters):
         parameters = list(parameters)
 
         self.optimization_step += 1
-        self.decay = self.get_decay(self.optimization_step)
+
+        # Compute the decay factor for the exponential moving average.
+        value = (1 + self.optimization_step) / (10 + self.optimization_step)
+        one_minus_decay = 1 - min(self.decay, value)
 
         for s_param, param in zip(self.shadow_params, parameters):
             if param.requires_grad:
-                tmp = self.decay * (s_param - param)
-                s_param.sub_(tmp)
+                s_param.sub_(one_minus_decay * (s_param - param))
             else:
                 s_param.copy_(param)
 
@@ -355,58 +323,9 @@ class EMAModel:
         ]
 
 
-@torch.inference_mode()
-def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pretrained_path, weight_dtype, revision):
-    # get state dict
-    state_dict = unet.state_dict()
-    #print(unet.conv_in.bias[:5])
-    # rename for multi-gpu
-    new_state_dict = {}
-    for key in state_dict:
-        if key.startswith("module."):
-            key = key.replace("module.", "")
-        new_state_dict[key] = state_dict[key].clone()
-    del state_dict
-    # create new model and load state dict into it
-    new_unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
-    new_unet.to(weight_dtype)
-    new_unet.load_state_dict(new_state_dict, strict=True)
-    new_unet.eval()
-    new_unet.to(accelerator.device)
-
-    
-    if use_ema:
-        ema_unet.copy_to(new_unet.parameters())
-    
-    tokenizer = CLIPTokenizer.from_pretrained(pretrained_path, subfolder="tokenizer", revision=revision)
-    scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_path, subfolder="scheduler", revision=revision)
-
-    pipe = StableDiffusionPipeline(
-        text_encoder=text_encoder,
-        vae=vae,
-        unet=new_unet,
-        tokenizer=tokenizer,
-        scheduler=scheduler,
-        safety_checker=None,
-        feature_extractor=None,     
-        requires_safety_checker=False,
-    )
-    
-    return pipe
-    
-    
 def main():
-    # wandb init
-    run = wandb.init(entity="finetuners")
-    
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
-    
-    # save args
-    import json
-    os.makedirs(args.output_dir, exist_ok=True)
-    with open(os.path.join(args.output_dir, 'args.json'), 'w+', encoding='utf-8') as f:
-        json.dump(vars(args), f, ensure_ascii=False, indent=4)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -429,8 +348,7 @@ def main():
     if accelerator.is_main_process:
         if args.push_to_hub:
             if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, 
-                                               token=args.hub_token)
+                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
             else:
                 repo_name = args.hub_model_id
             repo = Repository(args.output_dir, clone_from=repo_name)
@@ -463,14 +381,11 @@ def main():
         revision=args.revision,
     )
 
-    if is_xformers_available():
-        try:
+    if args.enable_xformers_memory_efficient_attention:
+        if is_xformers_available():
             unet.enable_xformers_memory_efficient_attention()
-        except Exception as e:
-            logger.warning(
-                "Could not enable memory efficient attention. Make sure xformers is installed"
-                f" correctly and a GPU is available: {e}"
-            )
+        else:
+            raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
@@ -519,124 +434,95 @@ def main():
             cache_dir=args.cache_dir,
         )
     else:
+        data_files = {}
         if args.train_data_dir is not None:
-            data_files = {}
             data_files["train"] = os.path.join(args.train_data_dir, "**")
-            dataset = load_dataset(
-                "imagefolder",
-                data_files=data_files,
-                cache_dir=args.cache_dir,
+        dataset = load_dataset(
+            "imagefolder",
+            data_files=data_files,
+            cache_dir=args.cache_dir,
+        )
+        # See more about loading custom images at
+        # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
+
+    # Preprocessing the datasets.
+    # We need to tokenize inputs and targets.
+    column_names = dataset["train"].column_names
+
+    # 6. Get the column names for input/target.
+    dataset_columns = dataset_name_mapping.get(args.dataset_name, None)
+    if args.image_column is None:
+        image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+    else:
+        image_column = args.image_column
+        if image_column not in column_names:
+            raise ValueError(
+                f"--image_column' value '{args.image_column}' needs to be one of: {', '.join(column_names)}"
+            )
+    if args.caption_column is None:
+        caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+    else:
+        caption_column = args.caption_column
+        if caption_column not in column_names:
+            raise ValueError(
+                f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
             )
 
-            # See more about loading custom images at
-            # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
-        elif args.train_data_dir_var_aspect is not None:
-            from varying_aspect_ratio_dataset import BucketSampler, BucketDataset
-            from torch.utils.data import DataLoader
-            from varying_aspect_ratio_dataset import create_df_from_parquets, assign_to_buckets
-
-            cache = f"laion_aesthetics_{args.max_files}.parquet"
-
-            import pandas as pd
-            if os.path.exists(cache):
-                df = pd.read_parquet(cache)
+    # Preprocessing the datasets.
+    # We need to tokenize input captions and transform the images.
+    def tokenize_captions(examples, is_train=True):
+        captions = []
+        for caption in examples[caption_column]:
+            if isinstance(caption, str):
+                captions.append(caption)
+            elif isinstance(caption, (list, np.ndarray)):
+                # take a random caption if there are multiple
+                captions.append(random.choice(caption) if is_train else caption[0])
             else:
-                with accelerator.main_process_first():
-                    df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=args.min_width, min_height=args.min_height, max_files=args.max_files)
-                    df = assign_to_buckets(df, 
-                                           bucket_step_size=64, 
-                                           max_width=args.max_width, max_height=args.max_height,
-                                           min_bucket_count=64)
-                    df.to_parquet(cache)
-
-            bucket_sampler = BucketSampler(df["bucket"], batch_size=args.train_batch_size) 
-            train_dataset = BucketDataset(df, tokenizer)
-            train_dataloader = DataLoader(train_dataset, batch_size=args.train_batch_size, 
-                                          sampler=bucket_sampler, 
-                                          pin_memory=True,
-                                          shuffle=False, 
-                                          num_workers=16,
-                                          drop_last=False)
-        
-    if args.train_data_dir_var_aspect is None:
-        # Preprocessing the datasets.
-        # We need to tokenize inputs and targets.
-        column_names = dataset["train"].column_names
-
-        # 6. Get the column names for input/target.
-        dataset_columns = dataset_name_mapping.get(args.dataset_name, None)
-        if args.image_column is None:
-            image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
-        else:
-            image_column = args.image_column
-            if image_column not in column_names:
                 raise ValueError(
-                    f"--image_column' value '{args.image_column}' needs to be one of: {', '.join(column_names)}"
+                    f"Caption column `{caption_column}` should contain either strings or lists of strings."
                 )
-        if args.caption_column is None:
-            caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
-        else:
-            caption_column = args.caption_column
-            if caption_column not in column_names:
-                raise ValueError(
-                    f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
-                )
+        inputs = tokenizer(captions, max_length=tokenizer.model_max_length, padding="do_not_pad", truncation=True)
+        input_ids = inputs.input_ids
+        return input_ids
 
-        # Preprocessing the datasets.
-        # We need to tokenize input captions and transform the images.
-        def tokenize_captions(examples, is_train=True):
-            captions = []
-            for caption in examples[caption_column]:
-                if isinstance(caption, str):
-                    captions.append(caption)
-                elif isinstance(caption, (list, np.ndarray)):
-                    # take a random caption if there are multiple
-                    captions.append(random.choice(caption) if is_train else caption[0])
-                else:
-                    raise ValueError(
-                        f"Caption column `{caption_column}` should contain either strings or lists of strings."
-                    )
-            inputs = tokenizer(captions, max_length=tokenizer.model_max_length, padding="do_not_pad", truncation=True)
-            input_ids = inputs.input_ids
-            return input_ids
+    train_transforms = transforms.Compose(
+        [
+            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
+            transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),
+        ]
+    )
 
-        train_transforms = transforms.Compose(
-            [
-                transforms.Resize((args.resolution, args.resolution), interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
-                transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
+    def preprocess_train(examples):
+        images = [image.convert("RGB") for image in examples[image_column]]
+        examples["pixel_values"] = [train_transforms(image) for image in images]
+        examples["input_ids"] = tokenize_captions(examples)
 
-        def preprocess_train(examples):
-            images = [image.convert("RGB") for image in examples[image_column]]
-            examples["pixel_values"] = [train_transforms(image) for image in images]
-            examples["input_ids"] = tokenize_captions(examples)
+        return examples
 
-            return examples
+    with accelerator.main_process_first():
+        if args.max_train_samples is not None:
+            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+        # Set the training transforms
+        train_dataset = dataset["train"].with_transform(preprocess_train)
 
-        with accelerator.main_process_first():
-            if args.max_train_samples is not None:
-                dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-            # Set the training transforms
-            train_dataset = dataset["train"].with_transform(preprocess_train)
+    def collate_fn(examples):
+        pixel_values = torch.stack([example["pixel_values"] for example in examples])
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+        input_ids = [example["input_ids"] for example in examples]
+        padded_tokens = tokenizer.pad({"input_ids": input_ids}, padding=True, return_tensors="pt")
+        return {
+            "pixel_values": pixel_values,
+            "input_ids": padded_tokens.input_ids,
+            "attention_mask": padded_tokens.attention_mask,
+        }
 
-        def collate_fn(examples):
-            pixel_values = torch.stack([example["pixel_values"] for example in examples])
-            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-            input_ids = [example["input_ids"] for example in examples]
-            padded_tokens = tokenizer.pad({"input_ids": input_ids}, padding=True, return_tensors="pt")
-            return {
-                "pixel_values": pixel_values,
-                "input_ids": padded_tokens.input_ids,
-                "attention_mask": padded_tokens.attention_mask,
-            }
-
-        train_dataloader = torch.utils.data.DataLoader(
-            train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=args.train_batch_size
-        )
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=args.train_batch_size
+    )
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -655,6 +541,7 @@ def main():
     unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         unet, optimizer, train_dataloader, lr_scheduler
     )
+    accelerator.register_for_checkpointing(lr_scheduler)
 
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -667,17 +554,10 @@ def main():
     # as these models are only used for inference, keeping weights in full precision is not required.
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
-    
-    if args.compile:
-        unet = torch.compile(unet)
-        vae = torch.compile(vae)
-        text_encoder = torch.compile(text_encoder)
 
     # Create EMA for the unet.
     if args.use_ema:
         ema_unet = EMAModel(unet.parameters())
-    else:
-        ema_unet = None
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -701,20 +581,40 @@ def main():
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    logger.info(f"  Learning rate at start = {args.learning_rate}")
-    
-    # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-    progress_bar.set_description("Steps")
     global_step = 0
-    
-    eval_every = 200 * args.gradient_accumulation_steps
-    save_every = 1000 * args.gradient_accumulation_steps
+    first_epoch = 0
 
-    for epoch in range(args.num_train_epochs):
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint != "latest":
+            path = os.path.basename(args.resume_from_checkpoint)
+        else:
+            # Get the most recent checkpoint
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            path = dirs[-1]
+        accelerator.print(f"Resuming from checkpoint {path}")
+        accelerator.load_state(os.path.join(args.output_dir, path))
+        global_step = int(path.split("-")[1])
+
+        resume_global_step = global_step * args.gradient_accumulation_steps
+        first_epoch = resume_global_step // num_update_steps_per_epoch
+        resume_step = resume_global_step % num_update_steps_per_epoch
+
+    # Only show the progress bar once on each machine.
+    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar.set_description("Steps")
+
+    for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+            # Skip steps until we reach the resumed step
+            if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
+                if step % args.gradient_accumulation_steps == 0:
+                    progress_bar.update(1)
+                continue
+
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
@@ -757,97 +657,48 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-                    
-                if accelerator.sync_gradients:
-                    if args.use_ema:
-                        ema_unet.step(unet.parameters())
-                    progress_bar.update(1)
-                    global_step += 1
-                    accelerator.log({"train_loss": train_loss}, step=global_step)
-                    train_loss = 0.0
 
-                logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-                progress_bar.set_postfix(**logs)
+            # Checks if the accelerator has performed an optimization step behind the scenes
+            if accelerator.sync_gradients:
+                if args.use_ema:
+                    ema_unet.step(unet.parameters())
+                progress_bar.update(1)
+                global_step += 1
+                accelerator.log({"train_loss": train_loss}, step=global_step)
+                train_loss = 0.0
 
-                if global_step >= args.max_train_steps:
-                    break
-                
-            # evaluate model regularly
-            if accelerator.is_local_main_process:
-                if step % eval_every == 0:
-                    gen_dir = os.path.join(args.output_dir, "generations", f"{global_step}")
-                    os.makedirs(gen_dir, exist_ok=True)
-        
-                    pipe = models_to_pipe(accelerator, args.use_ema,
-                                          unet, ema_unet, 
-                                          text_encoder, vae,  
-                                          args.pretrained_model_name_or_path,
-                                          weight_dtype,
-                                          args.revision)
+                if global_step % args.checkpointing_steps == 0:
+                    if accelerator.is_main_process:
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
+                        logger.info(f"Saved state to {save_path}")
 
+            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            progress_bar.set_postfix(**logs)
 
-                    prompts = ["full body portrait of Dilraba, slight smile, diffuse natural sun lights, autumn lights, highly detailed, digital painting, artstation, concept art, sharp focus, illustration",
-                               "cyborg woman| with a visible detailed brain| muscles cable wires| biopunk| cybernetic| cyberpunk| white marble bust| canon m50| 100mm| sharp focus| smooth| hyperrealism| highly detailed| intricate details| carved by michelangelo",
-                               "Goldorg, demonic orc from Moria, new leader of the Gundabad, strong muscular body, ugly figure, dirty grey skin, burned wrinkled face, body interlaced with frightening armor, metal coatings crossing head, heavy muscular figure, cinematic shot, detailed, trending on Artstation, dark blueish environment, demonic backlight, unreal engine, 8k",
-                               "Boris Johnson as smiling Rick Sanchez from Rick and Morty, unibrow, white robe, big eyes, realistic portrait, symmetrical, highly detailed, digital painting, artstation, concept art, smooth, sharp focus, illustration, cinematic lighting, art by artgerm and greg rutkowski and alphonse mucha",
-                               "Slavic dog head man, woolen torso in medieval clothes, characteristic of cynocephaly, oil painting, hyperrealism, beautiful, high resolution, trending on artstation",
-                               "Jesus taking a selfie, instagram, high detail, glamorous photograph, natural lighting",
-                              ]
+            if global_step >= args.max_train_steps:
+                break
 
-                    out_dict = {}
-                    
-                    if args.max_width > 256:
-                        resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
-                    else:
-                        resolutions = [(128, 128), (64, 64), (128, 64), (64, 128)]
-                    for width, height in resolutions:
-                        for i, p in enumerate(prompts):
-                            pil_img = pipe(p, output_type="pil", num_inference_steps=30,
-                                    guidance_scale=10, seed=11,
-                                    width=width, height=height,
-                              )[0][0]
-                            img_name = f"{i}_{width}x{height}.jpg"
-                            img_path = os.path.join(gen_dir, img_name)
-
-                            out_dict[f"{width}x{height}/{i}"] = wandb.Image(pil_img)
-                            pil_img.save(img_path)
-
-                    wandb.log(out_dict)
-                    del pipe
-        
-                if step > 5 and step % save_every == 0:
-                    pipe = models_to_pipe(accelerator, args.use_ema,
-                                          unet, ema_unet, 
-                                          text_encoder, vae,  
-                                          args.pretrained_model_name_or_path,
-                                          weight_dtype,
-                                          args.revision)
-                    save_folder = os.path.join(args.output_dir, f"model_at_{global_step}")
-                    os.makedirs(save_folder, exist_ok=True)
-                    pipe.save_pretrained(save_folder)
-                    del pipe
-                    
-        
-            
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        pipe = models_to_pipe(accelerator, args.use_ema,
-                              unet, ema_unet, 
-                              text_encoder, vae,  
-                              args.pretrained_model_name_or_path,
-                              weight_dtype,
-                              args.revision)
-        save_folder = os.path.join(args.output_dir, f"final_model_at_{global_step}")
-        os.makedirs(save_folder, exist_ok=True)
-        pipe.save_pretrained(save_folder)
+        unet = accelerator.unwrap_model(unet)
+        if args.use_ema:
+            ema_unet.copy_to(unet.parameters())
 
+        pipeline = StableDiffusionPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+            text_encoder=text_encoder,
+            vae=vae,
+            unet=unet,
+            revision=args.revision,
+        )
+        pipeline.save_pretrained(args.output_dir)
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
 
     accelerator.end_training()
-    run.finish()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,13 @@
+<<<<<<< HEAD
 __version__ = "0.10.2"
 
 from .configuration_utils import ConfigMixin
 from .onnx_utils import OnnxRuntimeModel
+=======
+__version__ = "0.12.0.dev0"
+
+from .configuration_utils import ConfigMixin
+>>>>>>> upstream/main
 from .utils import (
     OptionalDependencyNotAvailable,
     is_flax_available,
@@ -19,13 +25,37 @@ from .utils import (
 
 
 try:
+<<<<<<< HEAD
+=======
+    if not is_onnx_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    from .utils.dummy_onnx_objects import *  # noqa F403
+else:
+    from .pipelines import OnnxRuntimeModel
+
+try:
+>>>>>>> upstream/main
     if not is_torch_available():
         raise OptionalDependencyNotAvailable()
 except OptionalDependencyNotAvailable:
     from .utils.dummy_pt_objects import *  # noqa F403
 else:
+<<<<<<< HEAD
     from .modeling_utils import ModelMixin
     from .models import AutoencoderKL, Transformer2DModel, UNet1DModel, UNet2DConditionModel, UNet2DModel, VQModel
+=======
+    from .models import (
+        AutoencoderKL,
+        ModelMixin,
+        PriorTransformer,
+        Transformer2DModel,
+        UNet1DModel,
+        UNet2DConditionModel,
+        UNet2DModel,
+        VQModel,
+    )
+>>>>>>> upstream/main
     from .optimization import (
         get_constant_schedule,
         get_constant_schedule_with_warmup,
@@ -35,11 +65,21 @@ else:
         get_polynomial_decay_schedule_with_warmup,
         get_scheduler,
     )
+<<<<<<< HEAD
     from .pipeline_utils import DiffusionPipeline
     from .pipelines import (
         DanceDiffusionPipeline,
         DDIMPipeline,
         DDPMPipeline,
+=======
+    from .pipelines import (
+        AudioPipelineOutput,
+        DanceDiffusionPipeline,
+        DDIMPipeline,
+        DDPMPipeline,
+        DiffusionPipeline,
+        ImagePipelineOutput,
+>>>>>>> upstream/main
         KarrasVePipeline,
         LDMPipeline,
         LDMSuperResolutionPipeline,
@@ -63,6 +103,10 @@ else:
         RePaintScheduler,
         SchedulerMixin,
         ScoreSdeVeScheduler,
+<<<<<<< HEAD
+=======
+        UnCLIPScheduler,
+>>>>>>> upstream/main
         VQDiffusionScheduler,
     )
     from .training_utils import EMAModel
@@ -96,6 +140,11 @@ else:
         StableDiffusionPipeline,
         StableDiffusionPipelineSafe,
         StableDiffusionUpscalePipeline,
+<<<<<<< HEAD
+=======
+        UnCLIPImageVariationPipeline,
+        UnCLIPPipeline,
+>>>>>>> upstream/main
         VersatileDiffusionDualGuidedPipeline,
         VersatileDiffusionImageVariationPipeline,
         VersatileDiffusionPipeline,
@@ -124,6 +173,7 @@ else:
         OnnxStableDiffusionPipeline,
         StableDiffusionOnnxPipeline,
     )
+<<<<<<< HEAD
 
 try:
     if not (is_torch_available() and is_librosa_available()):
@@ -134,15 +184,31 @@ else:
     from .pipelines import AudioDiffusionPipeline, Mel
 
 try:
+=======
+
+try:
+    if not (is_torch_available() and is_librosa_available()):
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    from .utils.dummy_torch_and_librosa_objects import *  # noqa F403
+else:
+    from .pipelines import AudioDiffusionPipeline, Mel
+
+try:
+>>>>>>> upstream/main
     if not is_flax_available():
         raise OptionalDependencyNotAvailable()
 except OptionalDependencyNotAvailable:
     from .utils.dummy_flax_objects import *  # noqa F403
 else:
+<<<<<<< HEAD
     from .modeling_flax_utils import FlaxModelMixin
+=======
+    from .models.modeling_flax_utils import FlaxModelMixin
+>>>>>>> upstream/main
     from .models.unet_2d_condition_flax import FlaxUNet2DConditionModel
     from .models.vae_flax import FlaxAutoencoderKL
-    from .pipeline_flax_utils import FlaxDiffusionPipeline
+    from .pipelines import FlaxDiffusionPipeline
     from .schedulers import (
         FlaxDDIMScheduler,
         FlaxDDPMScheduler,
@@ -154,7 +220,10 @@ else:
         FlaxScoreSdeVeScheduler,
     )
 
+<<<<<<< HEAD
 from .callbacks import LPIPSCallback, NormalDistLoss, ContrastLoss, LPIPSLoss, create_callbacks
+=======
+>>>>>>> upstream/main
 
 try:
     if not (is_flax_available() and is_transformers_available()):
@@ -162,4 +231,8 @@ try:
 except OptionalDependencyNotAvailable:
     from .utils.dummy_flax_and_transformers_objects import *  # noqa F403
 else:
+<<<<<<< HEAD
     from .pipelines import FlaxStableDiffusionPipeline
+=======
+    from .pipelines import FlaxStableDiffusionImg2ImgPipeline, FlaxStableDiffusionPipeline
+>>>>>>> upstream/main

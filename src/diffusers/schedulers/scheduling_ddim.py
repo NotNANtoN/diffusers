@@ -134,7 +134,11 @@ class DDIMScheduler(SchedulerMixin, ConfigMixin):
             "Please make sure to instantiate your scheduler with `prediction_type` instead. E.g. `scheduler ="
             " DDIMScheduler.from_pretrained(<model_id>, prediction_type='epsilon')`."
         )
+<<<<<<< HEAD
         predict_epsilon = deprecate("predict_epsilon", "0.11.0", message, take_from=kwargs)
+=======
+        predict_epsilon = deprecate("predict_epsilon", "0.13.0", message, take_from=kwargs)
+>>>>>>> upstream/main
         if predict_epsilon is not None:
             self.register_to_config(prediction_type="epsilon" if predict_epsilon else "sample")
 

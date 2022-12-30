@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from ..configuration_utils import ConfigMixin, register_to_config
-from ..modeling_utils import ModelMixin
 from ..utils import BaseOutput
 from .unet_2d_blocks import UNetMidBlock2D, get_down_block, get_up_block
 
@@ -35,33 +33,6 @@ class DecoderOutput(BaseOutput):
     """
 
     sample: torch.FloatTensor
-
-
-@dataclass
-class VQEncoderOutput(BaseOutput):
-    """
-    Output of VQModel encoding method.
-
-    Args:
-        latents (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
-            Encoded output sample of the model. Output of the last layer of the model.
-    """
-
-    latents: torch.FloatTensor
-
-
-@dataclass
-class AutoencoderKLOutput(BaseOutput):
-    """
-    Output of AutoencoderKL encoding method.
-
-    Args:
-        latent_dist (`DiagonalGaussianDistribution`):
-            Encoded outputs of `Encoder` represented as the mean and logvar of `DiagonalGaussianDistribution`.
-            `DiagonalGaussianDistribution` allows for sampling latents from the distribution.
-    """
-
-    latent_dist: "DiagonalGaussianDistribution"
 
 
 class Encoder(nn.Module):
@@ -384,6 +355,7 @@ class DiagonalGaussianDistribution(object):
 
     def mode(self):
         return self.mean
+<<<<<<< HEAD
 
 
 class VQModel(ModelMixin, ConfigMixin):
@@ -636,3 +608,5 @@ class AutoencoderKL(ModelMixin, ConfigMixin):
             return (dec,)
 
         return DecoderOutput(sample=dec)
+=======
+>>>>>>> upstream/main

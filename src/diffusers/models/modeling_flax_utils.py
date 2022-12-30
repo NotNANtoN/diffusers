@@ -27,10 +27,15 @@ from huggingface_hub import hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
 from requests import HTTPError
 
+<<<<<<< HEAD:src/diffusers/modeling_flax_utils.py
 from . import __version__, is_torch_available
 from .hub_utils import send_telemetry
 from .modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
 from .utils import (
+=======
+from .. import __version__, is_torch_available
+from ..utils import (
+>>>>>>> upstream/main:src/diffusers/models/modeling_flax_utils.py
     CONFIG_NAME,
     DIFFUSERS_CACHE,
     FLAX_WEIGHTS_NAME,
@@ -38,6 +43,7 @@ from .utils import (
     WEIGHTS_NAME,
     logging,
 )
+from .modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
 
 
 logger = logging.get_logger(__name__)
@@ -190,7 +196,7 @@ class FlaxModelMixin:
         ```"""
         return self._cast_floating_to(params, jnp.float16, mask)
 
-    def init_weights(self, rng: jax.random.PRNGKey) -> Dict:
+    def init_weights(self, rng: jax.random.KeyArray) -> Dict:
         raise NotImplementedError(f"init_weights method has to be implemented for {self}")
 
     @classmethod

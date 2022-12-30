@@ -25,7 +25,10 @@ from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
 from ...configuration_utils import FrozenDict
 from ...models import AutoencoderKL, UNet2DConditionModel
+<<<<<<< HEAD
 from ...pipeline_utils import DiffusionPipeline
+=======
+>>>>>>> upstream/main
 from ...schedulers import (
     DDIMScheduler,
     DPMSolverMultistepScheduler,
@@ -35,6 +38,10 @@ from ...schedulers import (
     PNDMScheduler,
 )
 from ...utils import PIL_INTERPOLATION, deprecate, logging
+<<<<<<< HEAD
+=======
+from ..pipeline_utils import DiffusionPipeline
+>>>>>>> upstream/main
 from . import StableDiffusionPipelineOutput
 from .safety_checker import StableDiffusionSafetyChecker
 
@@ -92,7 +99,11 @@ class StableDiffusionInpaintPipelineLegacy(DiffusionPipeline):
         feature_extractor ([`CLIPFeatureExtractor`]):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
+<<<<<<< HEAD
     _optional_components = ["safety_checker", "feature_extractor"]
+=======
+    _optional_components = ["feature_extractor"]
+>>>>>>> upstream/main
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.__init__
     def __init__(
@@ -261,9 +272,15 @@ class StableDiffusionInpaintPipelineLegacy(DiffusionPipeline):
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids
+<<<<<<< HEAD
         untruncated_ids = self.tokenizer(prompt, padding="max_length", return_tensors="pt").input_ids
 
         if not torch.equal(text_input_ids, untruncated_ids):
+=======
+        untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+        if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
+>>>>>>> upstream/main
             removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1])
             logger.warning(
                 "The following part of your input was truncated because CLIP can only handle sequences up to"
@@ -430,8 +447,14 @@ class StableDiffusionInpaintPipelineLegacy(DiffusionPipeline):
         guidance_scale: Optional[float] = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
+<<<<<<< HEAD
         eta: Optional[float] = 0.0,
         generator: Optional[torch.Generator] = None,
+=======
+        add_predicted_noise: Optional[bool] = False,
+        eta: Optional[float] = 0.0,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+>>>>>>> upstream/main
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
@@ -471,12 +494,23 @@ class StableDiffusionInpaintPipelineLegacy(DiffusionPipeline):
                 if `guidance_scale` is less than `1`).
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
+<<<<<<< HEAD
+=======
+            add_predicted_noise (`bool`, *optional*, defaults to True):
+                Use predicted noise instead of random noise when constructing noisy versions of the original image in
+                the reverse diffusion process
+>>>>>>> upstream/main
             eta (`float`, *optional*, defaults to 0.0):
                 Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
                 [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator`, *optional*):
+<<<<<<< HEAD
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
+=======
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+>>>>>>> upstream/main
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
@@ -498,7 +532,11 @@ class StableDiffusionInpaintPipelineLegacy(DiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
         message = "Please use `image` instead of `init_image`."
+<<<<<<< HEAD
         init_image = deprecate("init_image", "0.12.0", message, take_from=kwargs)
+=======
+        init_image = deprecate("init_image", "0.13.0", message, take_from=kwargs)
+>>>>>>> upstream/main
         image = init_image or image
 
         # 1. Check inputs
@@ -561,7 +599,16 @@ class StableDiffusionInpaintPipelineLegacy(DiffusionPipeline):
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
                 # masking
+<<<<<<< HEAD
                 init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, torch.tensor([t]))
+=======
+                if add_predicted_noise:
+                    init_latents_proper = self.scheduler.add_noise(
+                        init_latents_orig, noise_pred_uncond, torch.tensor([t])
+                    )
+                else:
+                    init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, torch.tensor([t]))
+>>>>>>> upstream/main
 
                 latents = (init_latents_proper * mask) + (latents * (1 - mask))
 

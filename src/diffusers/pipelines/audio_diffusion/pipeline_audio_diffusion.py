@@ -22,8 +22,13 @@ import torch
 from PIL import Image
 
 from ...models import AutoencoderKL, UNet2DConditionModel
+<<<<<<< HEAD
 from ...pipeline_utils import AudioPipelineOutput, BaseOutput, DiffusionPipeline, ImagePipelineOutput
 from ...schedulers import DDIMScheduler, DDPMScheduler
+=======
+from ...schedulers import DDIMScheduler, DDPMScheduler
+from ..pipeline_utils import AudioPipelineOutput, BaseOutput, DiffusionPipeline, ImagePipelineOutput
+>>>>>>> upstream/main
 from .mel import Mel
 
 

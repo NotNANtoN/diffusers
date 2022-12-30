@@ -19,9 +19,15 @@ import torch
 import torch.nn as nn
 
 from ..configuration_utils import ConfigMixin, register_to_config
+<<<<<<< HEAD
 from ..modeling_utils import ModelMixin
 from ..utils import BaseOutput
 from .embeddings import GaussianFourierProjection, TimestepEmbedding, Timesteps
+=======
+from ..utils import BaseOutput
+from .embeddings import GaussianFourierProjection, TimestepEmbedding, Timesteps
+from .modeling_utils import ModelMixin
+>>>>>>> upstream/main
 from .unet_1d_blocks import get_down_block, get_mid_block, get_out_block, get_up_block
 
 
@@ -218,6 +224,10 @@ class UNet1DModel(ModelMixin, ConfigMixin):
         else:
             timestep_embed = timestep_embed[..., None]
             timestep_embed = timestep_embed.repeat([1, 1, sample.shape[2]]).to(sample.dtype)
+<<<<<<< HEAD
+=======
+            timestep_embed = timestep_embed.broadcast_to((sample.shape[:1] + timestep_embed.shape[1:]))
+>>>>>>> upstream/main
 
         # 2. down
         down_block_res_samples = ()

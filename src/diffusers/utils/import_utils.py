@@ -204,7 +204,11 @@ try:
     if _torch_available:
         import torch
 
+<<<<<<< HEAD
         if torch.__version__ < version.Version("1.12"):
+=======
+        if version.Version(torch.__version__) < version.Version("1.12"):
+>>>>>>> upstream/main
             raise ValueError("PyTorch should be >= 1.12")
     logger.debug(f"Successfully imported xformers version {_xformers_version}")
 except importlib_metadata.PackageNotFoundError:
@@ -359,12 +363,17 @@ def requires_backends(obj, backends):
         "VersatileDiffusionPipeline",
         "VersatileDiffusionDualGuidedPipeline",
         "StableDiffusionImageVariationPipeline",
+<<<<<<< HEAD
+=======
+        "UnCLIPPipeline",
+>>>>>>> upstream/main
     ] and is_transformers_version("<", "4.25.0"):
         raise ImportError(
             f"You need to install `transformers>=4.25` in order to use {name}: \n```\n pip install"
             " --upgrade transformers \n```"
         )
 
+<<<<<<< HEAD
     #if name in [
     #    "StableDiffusionDepth2ImgPipeline",
     #] and is_transformers_version("<", "4.26.0.dev0"):
@@ -372,6 +381,15 @@ def requires_backends(obj, backends):
     #        f"You need to install `transformers` from 'main' in order to use {name}: \n```\n pip install"
     #        " git+https://github.com/huggingface/transformers \n```"
     #    )
+=======
+    if name in [
+        "StableDiffusionDepth2ImgPipeline",
+    ] and is_transformers_version("<", "4.26.0.dev0"):
+        raise ImportError(
+            f"You need to install `transformers` from 'main' in order to use {name}: \n```\n pip install"
+            " git+https://github.com/huggingface/transformers \n```"
+        )
+>>>>>>> upstream/main
 
 
 class DummyObject(type):

@@ -18,7 +18,25 @@ import os
 from packaging import version
 
 from .. import __version__
+<<<<<<< HEAD
+=======
+from .constants import (
+    _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS,
+    CONFIG_NAME,
+    DIFFUSERS_CACHE,
+    DIFFUSERS_DYNAMIC_MODULE_NAME,
+    FLAX_WEIGHTS_NAME,
+    HF_MODULES_CACHE,
+    HUGGINGFACE_CO_RESOLVE_ENDPOINT,
+    ONNX_EXTERNAL_WEIGHTS_NAME,
+    ONNX_WEIGHTS_NAME,
+    SAFETENSORS_WEIGHTS_NAME,
+    WEIGHTS_NAME,
+)
+>>>>>>> upstream/main
 from .deprecation_utils import deprecate
+from .dynamic_modules_utils import get_class_from_dynamic_module
+from .hub_utils import HF_HUB_OFFLINE, http_user_agent
 from .import_utils import (
     ENV_VARS_TRUE_AND_AUTO_VALUES,
     ENV_VARS_TRUE_VALUES,
@@ -55,6 +73,10 @@ if is_torch_available():
         load_hf_numpy,
         load_image,
         load_numpy,
+<<<<<<< HEAD
+=======
+        nightly,
+>>>>>>> upstream/main
         parse_flag_from_env,
         require_torch_gpu,
         slow,
@@ -66,6 +88,7 @@ if is_torch_available():
 logger = get_logger(__name__)
 
 
+<<<<<<< HEAD
 hf_cache_home = os.path.expanduser(
     os.getenv("HF_HOME", os.path.join(os.getenv("XDG_CACHE_HOME", "~/.cache"), "huggingface"))
 )
@@ -96,6 +119,8 @@ _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS = [
 ]
 
 
+=======
+>>>>>>> upstream/main
 def check_min_version(min_version):
     if version.parse(__version__) < version.parse(min_version):
         if "dev" in min_version:

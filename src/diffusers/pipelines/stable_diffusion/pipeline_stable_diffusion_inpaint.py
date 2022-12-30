@@ -25,16 +25,115 @@ from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
 from ...configuration_utils import FrozenDict
 from ...models import AutoencoderKL, UNet2DConditionModel
-from ...pipeline_utils import DiffusionPipeline
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from ...utils import deprecate, logging
+from ..pipeline_utils import DiffusionPipeline
 from . import StableDiffusionPipelineOutput
 from .safety_checker import StableDiffusionSafetyChecker
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+<<<<<<< HEAD
+=======
 
 
+def prepare_mask_and_masked_image(image, mask):
+    """
+    Prepares a pair (image, mask) to be consumed by the Stable Diffusion pipeline. This means that those inputs will be
+    converted to ``torch.Tensor`` with shapes ``batch x channels x height x width`` where ``channels`` is ``3`` for the
+    ``image`` and ``1`` for the ``mask``.
+
+    The ``image`` will be converted to ``torch.float32`` and normalized to be in ``[-1, 1]``. The ``mask`` will be
+    binarized (``mask > 0.5``) and cast to ``torch.float32`` too.
+
+    Args:
+        image (Union[np.array, PIL.Image, torch.Tensor]): The image to inpaint.
+            It can be a ``PIL.Image``, or a ``height x width x 3`` ``np.array`` or a ``channels x height x width``
+            ``torch.Tensor`` or a ``batch x channels x height x width`` ``torch.Tensor``.
+        mask (_type_): The mask to apply to the image, i.e. regions to inpaint.
+            It can be a ``PIL.Image``, or a ``height x width`` ``np.array`` or a ``1 x height x width``
+            ``torch.Tensor`` or a ``batch x 1 x height x width`` ``torch.Tensor``.
+
+
+    Raises:
+        ValueError: ``torch.Tensor`` images should be in the ``[-1, 1]`` range. ValueError: ``torch.Tensor`` mask
+        should be in the ``[0, 1]`` range. ValueError: ``mask`` and ``image`` should have the same spatial dimensions.
+        TypeError: ``mask`` is a ``torch.Tensor`` but ``image`` is not
+            (ot the other way around).
+
+    Returns:
+        tuple[torch.Tensor]: The pair (mask, masked_image) as ``torch.Tensor`` with 4
+            dimensions: ``batch x channels x height x width``.
+    """
+    if isinstance(image, torch.Tensor):
+        if not isinstance(mask, torch.Tensor):
+            raise TypeError(f"`image` is a torch.Tensor but `mask` (type: {type(mask)} is not")
+
+        # Batch single image
+        if image.ndim == 3:
+            assert image.shape[0] == 3, "Image outside a batch should be of shape (3, H, W)"
+            image = image.unsqueeze(0)
+
+        # Batch and add channel dim for single mask
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0).unsqueeze(0)
+
+        # Batch single mask or add channel dim
+        if mask.ndim == 3:
+            # Single batched mask, no channel dim or single mask not batched but channel dim
+            if mask.shape[0] == 1:
+                mask = mask.unsqueeze(0)
+
+            # Batched masks no channel dim
+            else:
+                mask = mask.unsqueeze(1)
+
+        assert image.ndim == 4 and mask.ndim == 4, "Image and Mask must have 4 dimensions"
+        assert image.shape[-2:] == mask.shape[-2:], "Image and Mask must have the same spatial dimensions"
+        assert image.shape[0] == mask.shape[0], "Image and Mask must have the same batch size"
+
+        # Check image is in [-1, 1]
+        if image.min() < -1 or image.max() > 1:
+            raise ValueError("Image should be in [-1, 1] range")
+
+        # Check mask is in [0, 1]
+        if mask.min() < 0 or mask.max() > 1:
+            raise ValueError("Mask should be in [0, 1] range")
+
+        # Binarize mask
+        mask[mask < 0.5] = 0
+        mask[mask >= 0.5] = 1
+
+        # Image as float32
+        image = image.to(dtype=torch.float32)
+    elif isinstance(mask, torch.Tensor):
+        raise TypeError(f"`mask` is a torch.Tensor but `image` (type: {type(image)} is not")
+    else:
+        # preprocess image
+        if isinstance(image, (PIL.Image.Image, np.ndarray)):
+            image = [image]
+
+        if isinstance(image, list) and isinstance(image[0], PIL.Image.Image):
+            image = [np.array(i.convert("RGB"))[None, :] for i in image]
+            image = np.concatenate(image, axis=0)
+        elif isinstance(image, list) and isinstance(image[0], np.ndarray):
+            image = np.concatenate([i[None, :] for i in image], axis=0)
+
+        image = image.transpose(0, 3, 1, 2)
+        image = torch.from_numpy(image).to(dtype=torch.float32) / 127.5 - 1.0
+
+        # preprocess mask
+        if isinstance(mask, (PIL.Image.Image, np.ndarray)):
+            mask = [mask]
+>>>>>>> upstream/main
+
+        if isinstance(mask, list) and isinstance(mask[0], PIL.Image.Image):
+            mask = np.concatenate([np.array(m.convert("L"))[None, None, :] for m in mask], axis=0)
+            mask = mask.astype(np.float32) / 255.0
+        elif isinstance(mask, list) and isinstance(mask[0], np.ndarray):
+            mask = np.concatenate([m[None, None, :] for m in mask], axis=0)
+
+<<<<<<< HEAD
 def prepare_mask_and_masked_image(image, mask):
     """
     Prepares a pair (image, mask) to be consumed by the Stable Diffusion pipeline. This means that those inputs will be
@@ -121,6 +220,14 @@ def prepare_mask_and_masked_image(image, mask):
 
     masked_image = image * (mask < 0.5)
 
+=======
+        mask[mask < 0.5] = 0
+        mask[mask >= 0.5] = 1
+        mask = torch.from_numpy(mask)
+
+    masked_image = image * (mask < 0.5)
+
+>>>>>>> upstream/main
     return mask, masked_image
 
 
@@ -260,12 +367,21 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline):
         for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae]:
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
+<<<<<<< HEAD
 
         if self.safety_checker is not None:
             # TODO(Patrick) - there is currently a bug with cpu offload of nn.Parameter in accelerate
             # fix by only offloading self.safety_checker for now
             cpu_offload(self.safety_checker.vision_model, device)
 
+=======
+
+        if self.safety_checker is not None:
+            # TODO(Patrick) - there is currently a bug with cpu offload of nn.Parameter in accelerate
+            # fix by only offloading self.safety_checker for now
+            cpu_offload(self.safety_checker.vision_model, device)
+
+>>>>>>> upstream/main
     @property
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._execution_device
     def _execution_device(self):
@@ -313,9 +429,15 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline):
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids
+<<<<<<< HEAD
         untruncated_ids = self.tokenizer(prompt, padding="max_length", return_tensors="pt").input_ids
 
         if not torch.equal(text_input_ids, untruncated_ids):
+=======
+        untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+        if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
+>>>>>>> upstream/main
             removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1])
             logger.warning(
                 "The following part of your input was truncated because CLIP can only handle sequences up to"
@@ -448,6 +570,7 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline):
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+<<<<<<< HEAD
         if latents is None:
             if device.type == "mps":
                 # randn does not work reproducibly on mps
@@ -484,6 +607,77 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline):
         mask = mask.repeat(batch_size, 1, 1, 1)
         masked_image_latents = masked_image_latents.repeat(batch_size, 1, 1, 1)
 
+=======
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+
+        if latents is None:
+            rand_device = "cpu" if device.type == "mps" else device
+
+            if isinstance(generator, list):
+                shape = (1,) + shape[1:]
+                latents = [
+                    torch.randn(shape, generator=generator[i], device=rand_device, dtype=dtype)
+                    for i in range(batch_size)
+                ]
+                latents = torch.cat(latents, dim=0).to(device)
+            else:
+                latents = torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
+        else:
+            if latents.shape != shape:
+                raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
+            latents = latents.to(device)
+
+        # scale the initial noise by the standard deviation required by the scheduler
+        latents = latents * self.scheduler.init_noise_sigma
+        return latents
+
+    def prepare_mask_latents(
+        self, mask, masked_image, batch_size, height, width, dtype, device, generator, do_classifier_free_guidance
+    ):
+        # resize the mask to latents shape as we concatenate the mask to the latents
+        # we do that before converting to dtype to avoid breaking in case we're using cpu_offload
+        # and half precision
+        mask = torch.nn.functional.interpolate(
+            mask, size=(height // self.vae_scale_factor, width // self.vae_scale_factor)
+        )
+        mask = mask.to(device=device, dtype=dtype)
+
+        masked_image = masked_image.to(device=device, dtype=dtype)
+
+        # encode the mask image into latents space so we can concatenate it to the latents
+        if isinstance(generator, list):
+            masked_image_latents = [
+                self.vae.encode(masked_image[i : i + 1]).latent_dist.sample(generator=generator[i])
+                for i in range(batch_size)
+            ]
+            masked_image_latents = torch.cat(masked_image_latents, dim=0)
+        else:
+            masked_image_latents = self.vae.encode(masked_image).latent_dist.sample(generator=generator)
+        masked_image_latents = 0.18215 * masked_image_latents
+
+        # duplicate mask and masked_image_latents for each generation per prompt, using mps friendly method
+        if mask.shape[0] < batch_size:
+            if not batch_size % mask.shape[0] == 0:
+                raise ValueError(
+                    "The passed mask and the required batch size don't match. Masks are supposed to be duplicated to"
+                    f" a total batch size of {batch_size}, but {mask.shape[0]} masks were passed. Make sure the number"
+                    " of masks that you pass is divisible by the total requested batch size."
+                )
+            mask = mask.repeat(batch_size // mask.shape[0], 1, 1, 1)
+        if masked_image_latents.shape[0] < batch_size:
+            if not batch_size % masked_image_latents.shape[0] == 0:
+                raise ValueError(
+                    "The passed images and the required batch size don't match. Images are supposed to be duplicated"
+                    f" to a total batch size of {batch_size}, but {masked_image_latents.shape[0]} images were passed."
+                    " Make sure the number of images that you pass is divisible by the total requested batch size."
+                )
+            masked_image_latents = masked_image_latents.repeat(batch_size // masked_image_latents.shape[0], 1, 1, 1)
+
+>>>>>>> upstream/main
         mask = torch.cat([mask] * 2) if do_classifier_free_guidance else mask
         masked_image_latents = (
             torch.cat([masked_image_latents] * 2) if do_classifier_free_guidance else masked_image_latents
@@ -506,7 +700,11 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline):
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
+<<<<<<< HEAD
         generator: Optional[torch.Generator] = None,
+=======
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+>>>>>>> upstream/main
         latents: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
@@ -549,8 +747,13 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline):
                 Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
                 [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator`, *optional*):
+<<<<<<< HEAD
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
+=======
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+>>>>>>> upstream/main
             latents (`torch.FloatTensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
@@ -639,6 +842,7 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline):
                 f" = {num_channels_latents+num_channels_masked_image+num_channels_mask}. Please verify the config of"
                 " `pipeline.unet` or your `mask_image` or `image` input."
             )
+<<<<<<< HEAD
 
         # 9. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -677,6 +881,46 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline):
         # 12. Run safety checker
         image, has_nsfw_concept = self.run_safety_checker(image, device, text_embeddings.dtype)
 
+=======
+
+        # 9. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+        # 10. Denoising loop
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                # expand the latents if we are doing classifier free guidance
+                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+
+                # concat latents, mask, masked_image_latents in the channel dimension
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+
+                # predict the noise residual
+                noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+
+                # perform guidance
+                if do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        callback(i, t, latents)
+
+        # 11. Post-processing
+        image = self.decode_latents(latents)
+
+        # 12. Run safety checker
+        image, has_nsfw_concept = self.run_safety_checker(image, device, text_embeddings.dtype)
+
+>>>>>>> upstream/main
         # 13. Convert to PIL
         if output_type == "pil":
             image = self.numpy_to_pil(image)

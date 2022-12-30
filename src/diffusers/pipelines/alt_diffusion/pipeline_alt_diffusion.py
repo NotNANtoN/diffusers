@@ -23,7 +23,10 @@ from transformers import CLIPFeatureExtractor, XLMRobertaTokenizer
 
 from ...configuration_utils import FrozenDict
 from ...models import AutoencoderKL, UNet2DConditionModel
+<<<<<<< HEAD
 from ...pipeline_utils import DiffusionPipeline
+=======
+>>>>>>> upstream/main
 from ...schedulers import (
     DDIMScheduler,
     DPMSolverMultistepScheduler,
@@ -33,6 +36,10 @@ from ...schedulers import (
     PNDMScheduler,
 )
 from ...utils import deprecate, logging
+<<<<<<< HEAD
+=======
+from ..pipeline_utils import DiffusionPipeline
+>>>>>>> upstream/main
 from ..stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from . import AltDiffusionPipelineOutput, RobertaSeriesModelWithTransformation
 
@@ -249,9 +256,15 @@ class AltDiffusionPipeline(DiffusionPipeline):
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids
+<<<<<<< HEAD
         untruncated_ids = self.tokenizer(prompt, padding="max_length", return_tensors="pt").input_ids
 
         if not torch.equal(text_input_ids, untruncated_ids):
+=======
+        untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+        if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
+>>>>>>> upstream/main
             removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1])
             logger.warning(
                 "The following part of your input was truncated because CLIP can only handle sequences up to"
@@ -379,12 +392,33 @@ class AltDiffusionPipeline(DiffusionPipeline):
 
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+<<<<<<< HEAD
         if latents is None:
             if device.type == "mps":
                 # randn does not work reproducibly on mps
                 latents = torch.randn(shape, generator=generator, device="cpu", dtype=dtype).to(device)
             else:
                 latents = torch.randn(shape, generator=generator, device=device, dtype=dtype)
+=======
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+
+        if latents is None:
+            rand_device = "cpu" if device.type == "mps" else device
+
+            if isinstance(generator, list):
+                shape = (1,) + shape[1:]
+                latents = [
+                    torch.randn(shape, generator=generator[i], device=rand_device, dtype=dtype)
+                    for i in range(batch_size)
+                ]
+                latents = torch.cat(latents, dim=0).to(device)
+            else:
+                latents = torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
+>>>>>>> upstream/main
         else:
             if latents.shape != shape:
                 raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
@@ -405,7 +439,11 @@ class AltDiffusionPipeline(DiffusionPipeline):
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
+<<<<<<< HEAD
         generator: Optional[torch.Generator] = None,
+=======
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+>>>>>>> upstream/main
         latents: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
@@ -440,8 +478,13 @@ class AltDiffusionPipeline(DiffusionPipeline):
                 Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
                 [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator`, *optional*):
+<<<<<<< HEAD
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
+=======
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+>>>>>>> upstream/main
             latents (`torch.FloatTensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents

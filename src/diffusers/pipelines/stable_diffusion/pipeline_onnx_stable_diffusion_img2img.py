@@ -22,16 +22,24 @@ import PIL
 from transformers import CLIPFeatureExtractor, CLIPTokenizer
 
 from ...configuration_utils import FrozenDict
+<<<<<<< HEAD
 from ...onnx_utils import ORT_TO_NP_TYPE, OnnxRuntimeModel
 from ...pipeline_utils import DiffusionPipeline
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from ...utils import PIL_INTERPOLATION, deprecate, logging
+=======
+from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from ...utils import PIL_INTERPOLATION, deprecate, logging
+from ..onnx_utils import ORT_TO_NP_TYPE, OnnxRuntimeModel
+from ..pipeline_utils import DiffusionPipeline
+>>>>>>> upstream/main
 from . import StableDiffusionPipelineOutput
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+<<<<<<< HEAD
 def preprocess(image):
     w, h = image.size
     w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
@@ -39,6 +47,28 @@ def preprocess(image):
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
     return 2.0 * image - 1.0
+=======
+# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.preprocess
+def preprocess(image):
+    if isinstance(image, torch.Tensor):
+        return image
+    elif isinstance(image, PIL.Image.Image):
+        image = [image]
+
+    if isinstance(image[0], PIL.Image.Image):
+        w, h = image[0].size
+        w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+
+        image = [np.array(i.resize((w, h), resample=PIL_INTERPOLATION["lanczos"]))[None, :] for i in image]
+        image = np.concatenate(image, axis=0)
+        image = np.array(image).astype(np.float32) / 255.0
+        image = image.transpose(0, 3, 1, 2)
+        image = 2.0 * image - 1.0
+        image = torch.from_numpy(image)
+    elif isinstance(image[0], torch.Tensor):
+        image = torch.cat(image, dim=0)
+    return image
+>>>>>>> upstream/main
 
 
 class OnnxStableDiffusionImg2ImgPipeline(DiffusionPipeline):
@@ -298,7 +328,11 @@ class OnnxStableDiffusionImg2ImgPipeline(DiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
         message = "Please use `image` instead of `init_image`."
+<<<<<<< HEAD
         init_image = deprecate("init_image", "0.12.0", message, take_from=kwargs)
+=======
+        init_image = deprecate("init_image", "0.13.0", message, take_from=kwargs)
+>>>>>>> upstream/main
         image = init_image or image
 
         if isinstance(prompt, str):
@@ -325,8 +359,12 @@ class OnnxStableDiffusionImg2ImgPipeline(DiffusionPipeline):
         # set timesteps
         self.scheduler.set_timesteps(num_inference_steps)
 
+<<<<<<< HEAD
         if isinstance(image, PIL.Image.Image):
             image = preprocess(image)
+=======
+        image = preprocess(image).cpu().numpy()
+>>>>>>> upstream/main
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`

@@ -1,13 +1,9 @@
-import sys
-sys.path.append("../../../diffusers/src/")
-
-
 import argparse
 import hashlib
-import inspect
 import itertools
 import math
 import os
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -154,7 +150,25 @@ def parse_args(input_args=None):
         default=None,
         help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
     )
-    parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every X updates steps.")
+    parser.add_argument(
+        "--checkpointing_steps",
+        type=int,
+        default=500,
+        help=(
+            "Save a checkpoint of the training state every X updates. These checkpoints can be used both as final"
+            " checkpoints in case they are better than the last checkpoint, and are also suitable for resuming"
+            " training using `--resume_from_checkpoint`."
+        ),
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
+            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
+        ),
+    )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
@@ -191,6 +205,13 @@ def parse_args(input_args=None):
         "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
+        "--lr_num_cycles",
+        type=int,
+        default=1,
+        help="Number of hard resets of the lr in cosine_with_restarts scheduler.",
+    )
+    parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.")
+    parser.add_argument(
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
     )
     parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
@@ -226,7 +247,20 @@ def parse_args(input_args=None):
             " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
         ),
     )
+    parser.add_argument(
+        "--prior_generation_precision",
+        type=str,
+        default=None,
+        choices=["no", "fp32", "fp16", "bf16"],
+        help=(
+            "Choose prior generation precision between fp32, fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
+            " 1.10.and an Nvidia Ampere GPU.  Default to  fp16 if a GPU is available else fp32."
+        ),
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    parser.add_argument(
+        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -243,10 +277,11 @@ def parse_args(input_args=None):
         if args.class_prompt is None:
             raise ValueError("You must specify prompt for class images.")
     else:
+        # logger is not available yet
         if args.class_data_dir is not None:
-            logger.warning("You need not use --class_data_dir without --with_prior_preservation.")
+            warnings.warn("You need not use --class_data_dir without --with_prior_preservation.")
         if args.class_prompt is not None:
-            logger.warning("You need not use --class_prompt without --with_prior_preservation.")
+            warnings.warn("You need not use --class_prompt without --with_prior_preservation.")
 
     return args
 
@@ -411,6 +446,12 @@ def main(args):
 
         if cur_class_images < args.num_class_images:
             torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
+            if args.prior_generation_precision == "fp32":
+                torch_dtype = torch.float32
+            elif args.prior_generation_precision == "fp16":
+                torch_dtype = torch.float16
+            elif args.prior_generation_precision == "bf16":
+                torch_dtype = torch.bfloat16
             pipeline = DiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
@@ -494,15 +535,11 @@ def main(args):
         revision=args.revision,
     )
 
-
-    if is_xformers_available():
-        try:
+    if args.enable_xformers_memory_efficient_attention:
+        if is_xformers_available():
             unet.enable_xformers_memory_efficient_attention()
-        except Exception as e:
-            logger.warning(
-                "Could not enable memory efficient attention. Make sure xformers is installed"
-                f" correctly and a GPU is available: {e}"
-            )
+        else:
+            raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     vae.requires_grad_(False)
     if not args.train_text_encoder:
@@ -574,6 +611,8 @@ def main(args):
         optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
+        num_cycles=args.lr_num_cycles,
+        power=args.lr_power,
     )
 
     if args.train_text_encoder:
@@ -584,6 +623,7 @@ def main(args):
         unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             unet, optimizer, train_dataloader, lr_scheduler
         )
+    accelerator.register_for_checkpointing(lr_scheduler)
 
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -621,16 +661,41 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-    progress_bar.set_description("Steps")
     global_step = 0
+    first_epoch = 0
 
-    for epoch in range(args.num_train_epochs):
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint != "latest":
+            path = os.path.basename(args.resume_from_checkpoint)
+        else:
+            # Get the mos recent checkpoint
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            path = dirs[-1]
+        accelerator.print(f"Resuming from checkpoint {path}")
+        accelerator.load_state(os.path.join(args.output_dir, path))
+        global_step = int(path.split("-")[1])
+
+        resume_global_step = global_step * args.gradient_accumulation_steps
+        first_epoch = resume_global_step // num_update_steps_per_epoch
+        resume_step = resume_global_step % num_update_steps_per_epoch
+
+    # Only show the progress bar once on each machine.
+    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar.set_description("Steps")
+
+    for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         if args.train_text_encoder:
             text_encoder.train()
         for step, batch in enumerate(train_dataloader):
+            # Skip steps until we reach the resumed step
+            if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
+                if step % args.gradient_accumulation_steps == 0:
+                    progress_bar.update(1)
+                continue
+
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
@@ -667,7 +732,7 @@ def main(args):
                     target, target_prior = torch.chunk(target, 2, dim=0)
 
                     # Compute instance loss
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="none").mean([1, 2, 3]).mean()
+                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                     # Compute prior loss
                     prior_loss = F.mse_loss(model_pred_prior.float(), target_prior.float(), reduction="mean")
@@ -694,25 +759,11 @@ def main(args):
                 progress_bar.update(1)
                 global_step += 1
 
-                if global_step % args.save_steps == 0:
+                if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
-                        # When 'keep_fp32_wrapper' is `False` (the default), then the models are
-                        # unwrapped and the mixed precision hooks are removed, so training crashes
-                        # when the unwrapped models are used for further training.
-                        # This is only supported in newer versions of `accelerate`.
-                        # TODO(Pedro, Suraj): Remove `accepts_keep_fp32_wrapper` when forcing newer accelerate versions
-                        accepts_keep_fp32_wrapper = "keep_fp32_wrapper" in set(
-                            inspect.signature(accelerator.unwrap_model).parameters.keys()
-                        )
-                        extra_args = {"keep_fp32_wrapper": True} if accepts_keep_fp32_wrapper else {}
-                        pipeline = DiffusionPipeline.from_pretrained(
-                            args.pretrained_model_name_or_path,
-                            unet=accelerator.unwrap_model(unet, **extra_args),
-                            text_encoder=accelerator.unwrap_model(text_encoder, **extra_args),
-                            revision=args.revision,
-                        )
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        pipeline.save_pretrained(save_path)
+                        accelerator.save_state(save_path)
+                        logger.info(f"Saved state to {save_path}")
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -730,7 +781,6 @@ def main(args):
             unet=accelerator.unwrap_model(unet),
             text_encoder=accelerator.unwrap_model(text_encoder),
             revision=args.revision,
-            safety_checker=None,
         )
         pipeline.save_pretrained(args.output_dir)
 

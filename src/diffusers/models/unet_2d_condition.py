@@ -12,21 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
+<<<<<<< HEAD
 from typing import List, Optional, Tuple, Union
+=======
+from typing import Any, Dict, List, Optional, Tuple, Union
+>>>>>>> upstream/main
 
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from ..modeling_utils import ModelMixin
 from ..utils import BaseOutput, logging
+from .cross_attention import AttnProcessor
 from .embeddings import TimestepEmbedding, Timesteps
+<<<<<<< HEAD
+=======
+from .modeling_utils import ModelMixin
+>>>>>>> upstream/main
 from .unet_2d_blocks import (
     CrossAttnDownBlock2D,
     CrossAttnUpBlock2D,
     DownBlock2D,
     UNetMidBlock2DCrossAttn,
+    UNetMidBlock2DSimpleCrossAttn,
     UpBlock2D,
     get_down_block,
     get_up_block,
@@ -66,6 +75,8 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         freq_shift (`int`, *optional*, defaults to 0): The frequency shift to apply to the time embedding.
         down_block_types (`Tuple[str]`, *optional*, defaults to `("CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D")`):
             The tuple of downsample blocks to use.
+        mid_block_type (`str`, *optional*, defaults to `"UNetMidBlock2DCrossAttn"`):
+            The mid block type. Choose from `UNetMidBlock2DCrossAttn` or `UNetMidBlock2DSimpleCrossAttn`.
         up_block_types (`Tuple[str]`, *optional*, defaults to `("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D",)`):
             The tuple of upsample blocks to use.
         block_out_channels (`Tuple[int]`, *optional*, defaults to `(320, 640, 1280, 1280)`):
@@ -78,6 +89,10 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         norm_eps (`float`, *optional*, defaults to 1e-5): The epsilon to use for the normalization.
         cross_attention_dim (`int`, *optional*, defaults to 1280): The dimension of the cross attention features.
         attention_head_dim (`int`, *optional*, defaults to 8): The dimension of the attention heads.
+        resnet_time_scale_shift (`str`, *optional*, defaults to `"default"`): Time scale shift config
+            for resnet blocks, see [`~models.resnet.ResnetBlock2D`]. Choose from `default` or `scale_shift`.
+        class_embed_type (`str`, *optional*, defaults to None): The type of class embedding to use which is ultimately
+            summed with the time embeddings. Choose from `None`, `"timestep"`, or `"identity"`.
     """
 
     _supports_gradient_checkpointing = True
@@ -97,6 +112,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
             "CrossAttnDownBlock2D",
             "DownBlock2D",
         ),
+        mid_block_type: str = "UNetMidBlock2DCrossAttn",
         up_block_types: Tuple[str] = ("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
         only_cross_attention: Union[bool, Tuple[bool]] = False,
         block_out_channels: Tuple[int] = (320, 640, 1280, 1280),
@@ -110,8 +126,15 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         attention_head_dim: Union[int, Tuple[int]] = 8,
         dual_cross_attention: bool = False,
         use_linear_projection: bool = False,
+<<<<<<< HEAD
         num_class_embeds: Optional[int] = None,
         upcast_attention: bool = False,
+=======
+        class_embed_type: Optional[str] = None,
+        num_class_embeds: Optional[int] = None,
+        upcast_attention: bool = False,
+        resnet_time_scale_shift: str = "default",
+>>>>>>> upstream/main
     ):
         super().__init__()
 
@@ -128,8 +151,19 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         self.time_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim)
 
         # class embedding
+<<<<<<< HEAD
         if num_class_embeds is not None:
             self.class_embedding = nn.Embedding(num_class_embeds, time_embed_dim)
+=======
+        if class_embed_type is None and num_class_embeds is not None:
+            self.class_embedding = nn.Embedding(num_class_embeds, time_embed_dim)
+        elif class_embed_type == "timestep":
+            self.class_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim)
+        elif class_embed_type == "identity":
+            self.class_embedding = nn.Identity(time_embed_dim, time_embed_dim)
+        else:
+            self.class_embedding = None
+>>>>>>> upstream/main
 
         self.down_blocks = nn.ModuleList([])
         self.mid_block = None
@@ -165,10 +199,15 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
                 use_linear_projection=use_linear_projection,
                 only_cross_attention=only_cross_attention[i],
                 upcast_attention=upcast_attention,
+<<<<<<< HEAD
+=======
+                resnet_time_scale_shift=resnet_time_scale_shift,
+>>>>>>> upstream/main
             )
             self.down_blocks.append(down_block)
 
         # mid
+<<<<<<< HEAD
         self.mid_block = UNetMidBlock2DCrossAttn(
             in_channels=block_out_channels[-1],
             temb_channels=time_embed_dim,
@@ -183,6 +222,37 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
             use_linear_projection=use_linear_projection,
             upcast_attention=upcast_attention,
         )
+=======
+        if mid_block_type == "UNetMidBlock2DCrossAttn":
+            self.mid_block = UNetMidBlock2DCrossAttn(
+                in_channels=block_out_channels[-1],
+                temb_channels=time_embed_dim,
+                resnet_eps=norm_eps,
+                resnet_act_fn=act_fn,
+                output_scale_factor=mid_block_scale_factor,
+                resnet_time_scale_shift=resnet_time_scale_shift,
+                cross_attention_dim=cross_attention_dim,
+                attn_num_head_channels=attention_head_dim[-1],
+                resnet_groups=norm_num_groups,
+                dual_cross_attention=dual_cross_attention,
+                use_linear_projection=use_linear_projection,
+                upcast_attention=upcast_attention,
+            )
+        elif mid_block_type == "UNetMidBlock2DSimpleCrossAttn":
+            self.mid_block = UNetMidBlock2DSimpleCrossAttn(
+                in_channels=block_out_channels[-1],
+                temb_channels=time_embed_dim,
+                resnet_eps=norm_eps,
+                resnet_act_fn=act_fn,
+                output_scale_factor=mid_block_scale_factor,
+                cross_attention_dim=cross_attention_dim,
+                attn_num_head_channels=attention_head_dim[-1],
+                resnet_groups=norm_num_groups,
+                resnet_time_scale_shift=resnet_time_scale_shift,
+            )
+        else:
+            raise ValueError(f"unknown mid_block_type : {mid_block_type}")
+>>>>>>> upstream/main
 
         # count how many layers upsample the images
         self.num_upsamplers = 0
@@ -223,6 +293,10 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
                 use_linear_projection=use_linear_projection,
                 only_cross_attention=only_cross_attention[i],
                 upcast_attention=upcast_attention,
+<<<<<<< HEAD
+=======
+                resnet_time_scale_shift=resnet_time_scale_shift,
+>>>>>>> upstream/main
             )
             self.up_blocks.append(up_block)
             prev_output_channel = output_channel
@@ -231,6 +305,21 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps)
         self.conv_act = nn.SiLU()
         self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
+<<<<<<< HEAD
+=======
+
+    def set_attn_processor(self, processor: AttnProcessor):
+        # set recursively
+        def fn_recursive_attn_processor(module: torch.nn.Module):
+            if hasattr(module, "set_processor"):
+                module.set_processor(processor)
+
+            for child in module.children():
+                fn_recursive_attn_processor(child)
+
+        for module in self.children():
+            fn_recursive_attn_processor(module)
+>>>>>>> upstream/main
 
     def set_attention_slice(self, slice_size):
         r"""
@@ -282,6 +371,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
             dim = sliceable_head_dims[i]
             if size is not None and size > dim:
                 raise ValueError(f"size {size} has to be smaller or equal to {dim}.")
+<<<<<<< HEAD
 
         # Recursively walk through all the children.
         # Any children which exposes the set_attention_slice method
@@ -293,6 +383,19 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
             for child in module.children():
                 fn_recursive_set_attention_slice(child, slice_size)
 
+=======
+
+        # Recursively walk through all the children.
+        # Any children which exposes the set_attention_slice method
+        # gets the message
+        def fn_recursive_set_attention_slice(module: torch.nn.Module, slice_size: List[int]):
+            if hasattr(module, "set_attention_slice"):
+                module.set_attention_slice(slice_size.pop())
+
+            for child in module.children():
+                fn_recursive_set_attention_slice(child, slice_size)
+
+>>>>>>> upstream/main
         reversed_slice_size = list(reversed(slice_size))
         for module in self.children():
             fn_recursive_set_attention_slice(module, reversed_slice_size)
@@ -307,6 +410,11 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
         class_labels: Optional[torch.Tensor] = None,
+<<<<<<< HEAD
+=======
+        attention_mask: Optional[torch.Tensor] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+>>>>>>> upstream/main
         return_dict: bool = True,
     ) -> Union[UNet2DConditionOutput, Tuple]:
         r"""
@@ -335,6 +443,11 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         if any(s % default_overall_up_factor != 0 for s in sample.shape[-2:]):
             logger.info("Forward upsample size to force interpolation output size.")
             forward_upsample_size = True
+
+        # prepare attention_mask
+        if attention_mask is not None:
+            attention_mask = (1 - attention_mask.to(sample.dtype)) * -10000.0
+            attention_mask = attention_mask.unsqueeze(1)
 
         # 0. center input if necessary
         if self.config.center_input_sample:
@@ -365,9 +478,19 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         t_emb = t_emb.to(dtype=self.dtype)
         emb = self.time_embedding(t_emb)
 
+<<<<<<< HEAD
         if self.config.num_class_embeds is not None:
             if class_labels is None:
                 raise ValueError("class_labels should be provided when num_class_embeds > 0")
+=======
+        if self.class_embedding is not None:
+            if class_labels is None:
+                raise ValueError("class_labels should be provided when num_class_embeds > 0")
+
+            if self.config.class_embed_type == "timestep":
+                class_labels = self.time_proj(class_labels)
+
+>>>>>>> upstream/main
             class_emb = self.class_embedding(class_labels).to(dtype=self.dtype)
             emb = emb + class_emb
 
@@ -382,6 +505,8 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
                     hidden_states=sample,
                     temb=emb,
                     encoder_hidden_states=encoder_hidden_states,
+                    attention_mask=attention_mask,
+                    cross_attention_kwargs=cross_attention_kwargs,
                 )
             else:
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
@@ -389,7 +514,13 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
             down_block_res_samples += res_samples
 
         # 4. mid
-        sample = self.mid_block(sample, emb, encoder_hidden_states=encoder_hidden_states)
+        sample = self.mid_block(
+            sample,
+            emb,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=attention_mask,
+            cross_attention_kwargs=cross_attention_kwargs,
+        )
 
         # 5. up
         for i, upsample_block in enumerate(self.up_blocks):
@@ -409,7 +540,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
                     temb=emb,
                     res_hidden_states_tuple=res_samples,
                     encoder_hidden_states=encoder_hidden_states,
+                    cross_attention_kwargs=cross_attention_kwargs,
                     upsample_size=upsample_size,
+                    attention_mask=attention_mask,
                 )
             else:
                 sample = upsample_block(

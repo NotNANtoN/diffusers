@@ -1,5 +1,9 @@
 import inspect
+<<<<<<< HEAD
 from typing import Optional, Tuple, Union
+=======
+from typing import List, Optional, Tuple, Union
+>>>>>>> upstream/main
 
 import numpy as np
 import torch
@@ -8,7 +12,10 @@ import torch.utils.checkpoint
 import PIL
 
 from ...models import UNet2DModel, VQModel
+<<<<<<< HEAD
 from ...pipeline_utils import DiffusionPipeline, ImagePipelineOutput
+=======
+>>>>>>> upstream/main
 from ...schedulers import (
     DDIMScheduler,
     DPMSolverMultistepScheduler,
@@ -18,6 +25,10 @@ from ...schedulers import (
     PNDMScheduler,
 )
 from ...utils import PIL_INTERPOLATION, deprecate
+<<<<<<< HEAD
+=======
+from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
+>>>>>>> upstream/main
 
 
 def preprocess(image):
@@ -70,7 +81,11 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
         batch_size: Optional[int] = 1,
         num_inference_steps: Optional[int] = 100,
         eta: Optional[float] = 0.0,
+<<<<<<< HEAD
         generator: Optional[torch.Generator] = None,
+=======
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+>>>>>>> upstream/main
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         **kwargs,
@@ -89,12 +104,18 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
                 Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
                 [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator`, *optional*):
+<<<<<<< HEAD
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
+=======
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+>>>>>>> upstream/main
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
             return_dict (`bool`, *optional*):
+<<<<<<< HEAD
                 Whether or not to return a [`~pipeline_utils.ImagePipelineOutput`] instead of a plain tuple.
 
         Returns:
@@ -104,6 +125,16 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
         """
         message = "Please use `image` instead of `init_image`."
         init_image = deprecate("init_image", "0.12.0", message, take_from=kwargs)
+=======
+                Whether or not to return a [`~pipelines.ImagePipelineOutput`] instead of a plain tuple.
+
+        Returns:
+            [`~pipelines.ImagePipelineOutput`] or `tuple`: [`~pipelines.utils.ImagePipelineOutput`] if `return_dict` is
+            True, otherwise a `tuple. When returning a tuple, the first element is a list with the generated images.
+        """
+        message = "Please use `image` instead of `init_image`."
+        init_image = deprecate("init_image", "0.13.0", message, take_from=kwargs)
+>>>>>>> upstream/main
         image = init_image or image
 
         if isinstance(image, PIL.Image.Image):

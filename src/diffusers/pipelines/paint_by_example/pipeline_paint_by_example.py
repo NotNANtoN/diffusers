@@ -23,9 +23,15 @@ from diffusers.utils import is_accelerate_available
 from transformers import CLIPFeatureExtractor
 
 from ...models import AutoencoderKL, UNet2DConditionModel
+<<<<<<< HEAD
 from ...pipeline_utils import DiffusionPipeline
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from ...utils import logging
+=======
+from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from ...utils import logging
+from ..pipeline_utils import DiffusionPipeline
+>>>>>>> upstream/main
 from ..stable_diffusion import StableDiffusionPipelineOutput
 from ..stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from .image_encoder import PaintByExampleImageEncoder
@@ -109,6 +115,7 @@ def prepare_mask_and_masked_image(image, mask):
         raise TypeError(f"`mask` is a torch.Tensor but `image` (type: {type(image)} is not")
     else:
         if isinstance(image, PIL.Image.Image):
+<<<<<<< HEAD
             image = np.array(image.convert("RGB"))
 
         image = image[None].transpose(0, 3, 1, 2)
@@ -119,6 +126,20 @@ def prepare_mask_and_masked_image(image, mask):
             mask = mask.astype(np.float32) / 255.0
 
         mask = mask[None, None]
+=======
+            image = [image]
+
+        image = np.concatenate([np.array(i.convert("RGB"))[None, :] for i in image], axis=0)
+        image = image.transpose(0, 3, 1, 2)
+        image = torch.from_numpy(image).to(dtype=torch.float32) / 127.5 - 1.0
+
+        # preprocess mask
+        if isinstance(mask, PIL.Image.Image):
+            mask = [mask]
+
+        mask = np.concatenate([np.array(m.convert("L"))[None, None, :] for m in mask], axis=0)
+        mask = mask.astype(np.float32) / 255.0
+>>>>>>> upstream/main
 
         # paint-by-example inverses the mask
         mask = 1 - mask
@@ -159,7 +180,13 @@ class PaintByExamplePipeline(DiffusionPipeline):
         feature_extractor ([`CLIPFeatureExtractor`]):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
+<<<<<<< HEAD
     _optional_components = ["safety_checker", "feature_extractor"]
+=======
+    # TODO: feature_extractor is required to encode initial images (if they are in PIL format),
+    # we should give a descriptive message if the pipeline doesn't have one.
+    _optional_components = ["safety_checker"]
+>>>>>>> upstream/main
 
     def __init__(
         self,
@@ -289,12 +316,33 @@ class PaintByExamplePipeline(DiffusionPipeline):
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+<<<<<<< HEAD
         if latents is None:
             if device.type == "mps":
                 # randn does not work reproducibly on mps
                 latents = torch.randn(shape, generator=generator, device="cpu", dtype=dtype).to(device)
             else:
                 latents = torch.randn(shape, generator=generator, device=device, dtype=dtype)
+=======
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+
+        if latents is None:
+            rand_device = "cpu" if device.type == "mps" else device
+
+            if isinstance(generator, list):
+                shape = (1,) + shape[1:]
+                latents = [
+                    torch.randn(shape, generator=generator[i], device=rand_device, dtype=dtype)
+                    for i in range(batch_size)
+                ]
+                latents = torch.cat(latents, dim=0).to(device)
+            else:
+                latents = torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
+>>>>>>> upstream/main
         else:
             if latents.shape != shape:
                 raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
@@ -319,12 +367,42 @@ class PaintByExamplePipeline(DiffusionPipeline):
         masked_image = masked_image.to(device=device, dtype=dtype)
 
         # encode the mask image into latents space so we can concatenate it to the latents
+<<<<<<< HEAD
         masked_image_latents = self.vae.encode(masked_image).latent_dist.sample(generator=generator)
         masked_image_latents = 0.18215 * masked_image_latents
 
         # duplicate mask and masked_image_latents for each generation per prompt, using mps friendly method
         mask = mask.repeat(batch_size, 1, 1, 1)
         masked_image_latents = masked_image_latents.repeat(batch_size, 1, 1, 1)
+=======
+        if isinstance(generator, list):
+            masked_image_latents = [
+                self.vae.encode(masked_image[i : i + 1]).latent_dist.sample(generator=generator[i])
+                for i in range(batch_size)
+            ]
+            masked_image_latents = torch.cat(masked_image_latents, dim=0)
+        else:
+            masked_image_latents = self.vae.encode(masked_image).latent_dist.sample(generator=generator)
+        masked_image_latents = 0.18215 * masked_image_latents
+
+        # duplicate mask and masked_image_latents for each generation per prompt, using mps friendly method
+        if mask.shape[0] < batch_size:
+            if not batch_size % mask.shape[0] == 0:
+                raise ValueError(
+                    "The passed mask and the required batch size don't match. Masks are supposed to be duplicated to"
+                    f" a total batch size of {batch_size}, but {mask.shape[0]} masks were passed. Make sure the number"
+                    " of masks that you pass is divisible by the total requested batch size."
+                )
+            mask = mask.repeat(batch_size // mask.shape[0], 1, 1, 1)
+        if masked_image_latents.shape[0] < batch_size:
+            if not batch_size % masked_image_latents.shape[0] == 0:
+                raise ValueError(
+                    "The passed images and the required batch size don't match. Images are supposed to be duplicated"
+                    f" to a total batch size of {batch_size}, but {masked_image_latents.shape[0]} images were passed."
+                    " Make sure the number of images that you pass is divisible by the total requested batch size."
+                )
+            masked_image_latents = masked_image_latents.repeat(batch_size // masked_image_latents.shape[0], 1, 1, 1)
+>>>>>>> upstream/main
 
         mask = torch.cat([mask] * 2) if do_classifier_free_guidance else mask
         masked_image_latents = (
@@ -351,7 +429,11 @@ class PaintByExamplePipeline(DiffusionPipeline):
 
         if do_classifier_free_guidance:
             uncond_embeddings = self.image_encoder.uncond_vector
+<<<<<<< HEAD
             uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
+=======
+            uncond_embeddings = uncond_embeddings.repeat(1, image_embeddings.shape[0], 1)
+>>>>>>> upstream/main
             uncond_embeddings = uncond_embeddings.view(bs_embed * num_images_per_prompt, 1, -1)
 
             # For classifier free guidance, we need to do two forward passes.
@@ -374,7 +456,11 @@ class PaintByExamplePipeline(DiffusionPipeline):
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
+<<<<<<< HEAD
         generator: Optional[torch.Generator] = None,
+=======
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+>>>>>>> upstream/main
         latents: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
@@ -417,8 +503,13 @@ class PaintByExamplePipeline(DiffusionPipeline):
                 Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
                 [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator`, *optional*):
+<<<<<<< HEAD
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
+=======
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+>>>>>>> upstream/main
             latents (`torch.FloatTensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents

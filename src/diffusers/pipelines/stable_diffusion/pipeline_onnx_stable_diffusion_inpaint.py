@@ -22,10 +22,17 @@ import PIL
 from transformers import CLIPFeatureExtractor, CLIPTokenizer
 
 from ...configuration_utils import FrozenDict
+<<<<<<< HEAD
 from ...onnx_utils import ORT_TO_NP_TYPE, OnnxRuntimeModel
 from ...pipeline_utils import DiffusionPipeline
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from ...utils import PIL_INTERPOLATION, deprecate, logging
+=======
+from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from ...utils import PIL_INTERPOLATION, deprecate, logging
+from ..onnx_utils import ORT_TO_NP_TYPE, OnnxRuntimeModel
+from ..pipeline_utils import DiffusionPipeline
+>>>>>>> upstream/main
 from . import StableDiffusionPipelineOutput
 
 

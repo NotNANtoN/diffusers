@@ -17,7 +17,7 @@
 import importlib
 import inspect
 import os
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -28,11 +28,18 @@ from huggingface_hub import snapshot_download
 from PIL import Image
 from tqdm.auto import tqdm
 
+<<<<<<< HEAD:src/diffusers/pipeline_flax_utils.py
 from .configuration_utils import ConfigMixin
 from .hub_utils import http_user_agent, send_telemetry
 from .modeling_flax_utils import FLAX_WEIGHTS_NAME, FlaxModelMixin
 from .schedulers.scheduling_utils_flax import SCHEDULER_CONFIG_NAME, FlaxSchedulerMixin
 from .utils import CONFIG_NAME, DIFFUSERS_CACHE, BaseOutput, is_transformers_available, logging
+=======
+from ..configuration_utils import ConfigMixin
+from ..models.modeling_flax_utils import FLAX_WEIGHTS_NAME, FlaxModelMixin
+from ..schedulers.scheduling_utils_flax import SCHEDULER_CONFIG_NAME, FlaxSchedulerMixin
+from ..utils import CONFIG_NAME, DIFFUSERS_CACHE, BaseOutput, http_user_agent, is_transformers_available, logging
+>>>>>>> upstream/main:src/diffusers/pipelines/pipeline_flax_utils.py
 
 
 if is_transformers_available():
@@ -345,10 +352,13 @@ class FlaxDiffusionPipeline(ConfigMixin):
                 allow_patterns=allow_patterns,
                 ignore_patterns=ignore_patterns,
                 user_agent=user_agent,
+<<<<<<< HEAD:src/diffusers/pipeline_flax_utils.py
             )
             send_telemetry(
                 {"pipeline_class": requested_pipeline_class, "pipeline_path": "hub", "framework": "flax"},
                 name="diffusers_from_pretrained",
+=======
+>>>>>>> upstream/main:src/diffusers/pipelines/pipeline_flax_utils.py
             )
         else:
             cached_folder = pretrained_model_name_or_path
@@ -482,6 +492,51 @@ class FlaxDiffusionPipeline(ConfigMixin):
 
         model = pipeline_class(**init_kwargs, dtype=dtype)
         return model, params
+
+    @staticmethod
+    def _get_signature_keys(obj):
+        parameters = inspect.signature(obj.__init__).parameters
+        required_parameters = {k: v for k, v in parameters.items() if v.default == inspect._empty}
+        optional_parameters = set({k for k, v in parameters.items() if v.default != inspect._empty})
+        expected_modules = set(required_parameters.keys()) - set(["self"])
+        return expected_modules, optional_parameters
+
+    @property
+    def components(self) -> Dict[str, Any]:
+        r"""
+
+        The `self.components` property can be useful to run different pipelines with the same weights and
+        configurations to not have to re-allocate memory.
+
+        Examples:
+
+        ```py
+        >>> from diffusers import (
+        ...     FlaxStableDiffusionPipeline,
+        ...     FlaxStableDiffusionImg2ImgPipeline,
+        ... )
+
+        >>> text2img = FlaxStableDiffusionPipeline.from_pretrained(
+        ...     "runwayml/stable-diffusion-v1-5", revision="bf16", dtype=jnp.bfloat16
+        ... )
+        >>> img2img = FlaxStableDiffusionImg2ImgPipeline(**text2img.components)
+        ```
+
+        Returns:
+            A dictionary containing all the modules needed to initialize the pipeline.
+        """
+        expected_modules, optional_parameters = self._get_signature_keys(self)
+        components = {
+            k: getattr(self, k) for k in self.config.keys() if not k.startswith("_") and k not in optional_parameters
+        }
+
+        if set(components.keys()) != expected_modules:
+            raise ValueError(
+                f"{self} has been incorrectly initialized or {self.__class__} is incorrectly implemented. Expected"
+                f" {expected_modules} to be defined, but {components} are defined."
+            )
+
+        return components
 
     @staticmethod
     def numpy_to_pil(images):

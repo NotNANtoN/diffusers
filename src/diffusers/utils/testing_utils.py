@@ -83,6 +83,7 @@ def parse_flag_from_env(key, default=False):
 
 
 _run_slow_tests = parse_flag_from_env("RUN_SLOW", default=False)
+_run_nightly_tests = parse_flag_from_env("RUN_NIGHTLY", default=False)
 
 
 def floats_tensor(shape, scale=1.0, rng=None, name=None):
@@ -111,6 +112,19 @@ def slow(test_case):
     return unittest.skipUnless(_run_slow_tests, "test is slow")(test_case)
 
 
+<<<<<<< HEAD
+=======
+def nightly(test_case):
+    """
+    Decorator marking a test that runs nightly in the diffusers CI.
+
+    Slow tests are skipped by default. Set the RUN_NIGHTLY environment variable to a truthy value to run them.
+
+    """
+    return unittest.skipUnless(_run_nightly_tests, "test is nightly")(test_case)
+
+
+>>>>>>> upstream/main
 def require_torch(test_case):
     """
     Decorator marking a test that requires PyTorch. These tests are skipped when PyTorch isn't installed.

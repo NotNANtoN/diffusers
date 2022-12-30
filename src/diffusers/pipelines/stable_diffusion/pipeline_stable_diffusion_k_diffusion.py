@@ -19,7 +19,11 @@ import torch
 
 from k_diffusion.external import CompVisDenoiser, CompVisVDenoiser
 
+<<<<<<< HEAD
 from ... import DiffusionPipeline
+=======
+from ...pipelines import DiffusionPipeline
+>>>>>>> upstream/main
 from ...schedulers import LMSDiscreteScheduler
 from ...utils import is_accelerate_available, logging
 from . import StableDiffusionPipelineOutput
@@ -192,9 +196,15 @@ class StableDiffusionKDiffusionPipeline(DiffusionPipeline):
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids
+<<<<<<< HEAD
         untruncated_ids = self.tokenizer(prompt, padding="max_length", return_tensors="pt").input_ids
 
         if not torch.equal(text_input_ids, untruncated_ids):
+=======
+        untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+        if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
+>>>>>>> upstream/main
             removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1])
             logger.warning(
                 "The following part of your input was truncated because CLIP can only handle sequences up to"
@@ -332,7 +342,11 @@ class StableDiffusionKDiffusionPipeline(DiffusionPipeline):
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
+<<<<<<< HEAD
         generator: Optional[torch.Generator] = None,
+=======
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+>>>>>>> upstream/main
         latents: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
@@ -367,8 +381,13 @@ class StableDiffusionKDiffusionPipeline(DiffusionPipeline):
                 Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
                 [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator`, *optional*):
+<<<<<<< HEAD
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
+=======
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+>>>>>>> upstream/main
             latents (`torch.FloatTensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
