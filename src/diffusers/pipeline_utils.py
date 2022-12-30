@@ -452,6 +452,7 @@ class DiffusionPipeline(ConfigMixin):
         low_cpu_mem_usage = kwargs.pop("low_cpu_mem_usage", _LOW_CPU_MEM_USAGE_DEFAULT)
         return_cached_folder = kwargs.pop("return_cached_folder", False)
 
+
         # 1. Download the checkpoints and configs
         # use snapshot download here to get it working from from_pretrained
         if not os.path.isdir(pretrained_model_name_or_path):
@@ -564,12 +565,18 @@ class DiffusionPipeline(ConfigMixin):
         expected_modules, optional_kwargs = cls._get_signature_keys(pipeline_class)
         passed_class_obj = {k: kwargs.pop(k) for k in expected_modules if k in kwargs}
         passed_pipe_kwargs = {k: kwargs.pop(k) for k in optional_kwargs if k in kwargs}
+        
 
         init_dict, unused_kwargs, _ = pipeline_class.extract_init_dict(config_dict, **kwargs)
+        
 
         # define init kwargs
         init_kwargs = {k: init_dict.pop(k) for k in optional_kwargs if k in init_dict}
         init_kwargs = {**init_kwargs, **passed_pipe_kwargs}
+        # add optional models that are list of length two back to init dict
+        for k, v in list(init_kwargs.items())[:]:
+            if isinstance(v, list) and len(v) == 2:
+                init_dict[k] = init_kwargs.pop(k)
 
         # remove `null` components
         def load_module(name, value):
@@ -670,6 +677,7 @@ class DiffusionPipeline(ConfigMixin):
                 importable_classes = LOADABLE_CLASSES[library_name]
                 class_candidates = {c: getattr(library, c, None) for c in importable_classes.keys()}
 
+
             if loaded_sub_model is None:
                 load_method_name = None
                 for class_name, class_candidate in class_candidates.items():
@@ -737,7 +745,7 @@ class DiffusionPipeline(ConfigMixin):
 
         # 5. Instantiate the pipeline
         model = pipeline_class(**init_kwargs)
-
+        
         if return_cached_folder:
             return model, cached_folder
         return model

@@ -133,10 +133,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
             EulerAncestralDiscreteScheduler,
             DPMSolverMultistepScheduler,
         ],
-        safety_checker: StableDiffusionSafetyChecker,
-        depth_estimator: DPTForDepthEstimation,
-        feature_extractor: CLIPFeatureExtractor,
-        requires_safety_checker: bool = True,
+        safety_checker: StableDiffusionSafetyChecker = None,
+        feature_extractor: CLIPFeatureExtractor = None,
+        requires_safety_checker: bool = False,
+        depth_estimator: DPTForDepthEstimation = None,
     ):
         super().__init__()
 
@@ -204,6 +204,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
             new_config["sample_size"] = 64
             unet._internal_dict = FrozenDict(new_config)
 
+        extra_modules = {}
+        if depth_estimator is not None:
+            print("Add depth estimator!")
+            extra_modules["depth_estimator"] = depth_estimator
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -212,7 +216,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
-            depth_estimator=depth_estimator,
+            **extra_modules
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
@@ -571,6 +575,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         
+        estimate_depth: bool = False,
         depth_map: Optional[torch.FloatTensor] = None,
         start_img: Optional[torch.Tensor] = None,
         img2img_strength: Optional[float] = None,
@@ -662,16 +667,19 @@ class StableDiffusionPipeline(DiffusionPipeline):
         )
         
         # 4. Prepare depth mask
-        depth_mask = self.prepare_depth_map(
-            width,
-            height,
-            image,
-            depth_map,
-            batch_size * num_images_per_prompt,
-            do_classifier_free_guidance,
-            text_embeddings.dtype,
-            device,
-        )
+        if estimate_depth:
+            depth_mask = self.prepare_depth_map(
+                width,
+                height,
+                start_img,
+                depth_map,
+                batch_size * num_images_per_prompt,
+                do_classifier_free_guidance,
+                text_embeddings.dtype,
+                device,
+            )
+        else:
+            depth_mask = None
 
         # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
