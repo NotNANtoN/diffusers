@@ -541,6 +541,7 @@ class StableDiffusionDepth2ImgPipeline(DiffusionPipeline):
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
+                print(noise_pred.shape, t.shape, latents.shape)
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
                 # call the callback, if provided

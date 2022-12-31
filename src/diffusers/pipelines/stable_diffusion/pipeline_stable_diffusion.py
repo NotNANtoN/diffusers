@@ -38,10 +38,9 @@ from ...schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-from ...utils import deprecate, logging
+from ...utils import deprecate, logging, PIL_INTERPOLATION
 from . import StableDiffusionPipelineOutput
 from .safety_checker import StableDiffusionSafetyChecker
-
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -686,11 +685,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         # 6. Prepare latent variables
         latents, init_latents, timesteps, noise = self.get_start_latents(width, height, 
-                                                    batch_size * num_images_per_prompt, 
-                                                    generator, text_embeddings, device, 
-                                                    start_img, noise, img2img_strength, 
-                                                    latents, num_inference_steps
-                                                   )
+                                                                        batch_size * num_images_per_prompt, 
+                                                                        generator, text_embeddings, device, 
+                                                                        start_img, noise, img2img_strength, 
+                                                                        latents, num_inference_steps
+                                                                       )
         
         # 7 prepare mask
         # Prepare mask latent
@@ -708,7 +707,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
         # 9. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self.set_progress_bar_config(disable=not verbose)
-        
         
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -744,6 +742,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     init_latents_proper = self.scheduler.add_noise(init_latents, noise, torch.tensor([t]))
                     # import ipdb; ipdb.set_trace()
                     latents = (init_latents_proper * mask) + (latents * (1 - mask)) 
+                    
 
         # 10. Post-processing
         image = self.decode_latents(latents.to(text_embeddings.dtype))
@@ -799,6 +798,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     
                 init_latents = latents
                 
+                #print("init latents shape: ", init_latents.shape)
+                #print("noise shape:", noise.shape)
                 # add noise
                 if img2img_strength is not None and img2img_strength != 0:
                     # with img2img we skip the first (1-strength) * num_inference_steps steps, so we increase the total step count
@@ -812,7 +813,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     
                     timesteps = self.scheduler.timesteps[t_start]
                     timesteps = torch.tensor([timesteps] * batch_size, device=device)
-                    # add noise to latents using the timesteps      
+                    # add noise to latents using the timesteps 
+                    noise = noise[:, :latents.shape[1]]  # noise is sampled by in_channels, so we need to eliminate one channel for noising properly
                     latents = self.scheduler.add_noise(latents, noise, timesteps)
         timesteps_tensor = self.scheduler.timesteps[t_start:].to(device)
         return latents, init_latents, timesteps_tensor, noise
@@ -963,39 +965,39 @@ class StableDiffusionPipeline(DiffusionPipeline):
         
 def extra_loss_guidance():
     if loss_callbacks is not None and len(loss_callbacks) > 0:
-                    with torch.enable_grad():
-                        grads = torch.zeros_like(latents)
-                        step_index = self.scheduler.get_current_step(t)
-                        sigma = self.scheduler.sigmas[step_index]
-                        #denoised_images = None
-                        for callback_dict in loss_callbacks:
-                            if callback_dict["frequency"] is not None and i % callback_dict["frequency"] == 0:
-                                # Requires grad on the latents
-                                latents = latents.detach().requires_grad_()
-                                if callback_dict["apply_to_image"]:
-                                    # Get the predicted x0:
-                                    if scheduler_step_before_callbacks:
-                                        latents_x0 = latents
-                                    else:
-                                        if use_callbacks_simple_step:
-                                            # do simple step
-                                            latents_x0 = latents - sigma * noise_pred
-                                        else:
-                                            # actually use the scheduler step
-                                            latents_x0 = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+        with torch.enable_grad():
+            grads = torch.zeros_like(latents)
+            step_index = self.scheduler.get_current_step(t)
+            sigma = self.scheduler.sigmas[step_index]
+            #denoised_images = None
+            for callback_dict in loss_callbacks:
+                if callback_dict["frequency"] is not None and i % callback_dict["frequency"] == 0:
+                    # Requires grad on the latents
+                    latents = latents.detach().requires_grad_()
+                    if callback_dict["apply_to_image"]:
+                        # Get the predicted x0:
+                        if scheduler_step_before_callbacks:
+                            latents_x0 = latents
+                        else:
+                            if use_callbacks_simple_step:
+                                # do simple step
+                                latents_x0 = latents - sigma * noise_pred
+                            else:
+                                # actually use the scheduler step
+                                latents_x0 = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
-                                    # Decode to image space
-                                    #denoised_images = self.vae.decode((1 / 0.18215) * latents_x0) / 2 + 0.5  # (0, 1)
-                                    #if denoised_images is None:  
-                                    denoised_images = self.vae.decode(latents_x0 / 0.18215)["sample"] / 2 + 0.5  # (0, 1)
+                        # Decode to image space
+                        #denoised_images = self.vae.decode((1 / 0.18215) * latents_x0) / 2 + 0.5  # (0, 1)
+                        #if denoised_images is None:  
+                        denoised_images = self.vae.decode(latents_x0 / 0.18215)["sample"] / 2 + 0.5  # (0, 1)
 
-                                    # Calculate loss
-                                    loss = callback_dict["loss_function"](denoised_images)
-                                else:
-                                    loss = callback_dict["loss_function"](latents)
-                                # Get gradient
-                                cond_grad = -torch.autograd.grad(loss * callback_dict["weight"], latents)[0] 
-                                # Modify the latents based on this gradient
-                                grads += cond_grad * callback_dict["lr"]
+                        # Calculate loss
+                        loss = callback_dict["loss_function"](denoised_images)
+                    else:
+                        loss = callback_dict["loss_function"](latents)
+                    # Get gradient
+                    cond_grad = -torch.autograd.grad(loss * callback_dict["weight"], latents)[0] 
+                    # Modify the latents based on this gradient
+                    grads += cond_grad * callback_dict["lr"]
 
-                        latents = latents.detach() + grads * sigma**2
+            latents = latents.detach() + grads * sigma**2
