@@ -364,8 +364,10 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
     new_state_dict = {}
     for key in state_dict:
         if key.startswith("module."):
-            key = key.replace("module.", "")
-        new_state_dict[key] = state_dict[key].clone()
+            cleaned_key = key.replace("module.", "")
+        else:
+            cleaned_key = key
+        new_state_dict[cleaned_key] = state_dict[key].clone()
     del state_dict
     # create new model and load state dict into it
     new_unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
