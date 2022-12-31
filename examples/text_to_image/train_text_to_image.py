@@ -398,9 +398,6 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
     
     
 def main():
-    # wandb init
-    run = wandb.init(entity="finetuners")
-    
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
     
@@ -416,6 +413,10 @@ def main():
         log_with=args.report_to,
         logging_dir=logging_dir,
     )
+    
+    if accelerator.is_local_main_process:
+        # wandb init
+        run = wandb.init(entity="finetuners")
 
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -768,7 +769,8 @@ def main():
                     accelerator.log({"train_loss": train_loss}, step=global_step)
                     train_loss = 0.0
 
-                logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                current_lr = lr_scheduler.get_last_lr()[0]
+                logs = {"step_loss": loss.detach().item(), "lr": current_lr}
                 progress_bar.set_postfix(**logs)
 
                 if global_step >= args.max_train_steps:
@@ -776,6 +778,9 @@ def main():
                 
             # evaluate model regularly
             if accelerator.is_local_main_process:
+                # log learning rate
+                wandb.log({"lr": current_lr})
+                
                 if step % eval_every == 0:
                     gen_dir = os.path.join(args.output_dir, "generations", f"{global_step}")
                     os.makedirs(gen_dir, exist_ok=True)
@@ -849,7 +854,9 @@ def main():
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
 
     accelerator.end_training()
-    run.finish()
+    # finish logging
+    if accelerator.is_local_main_process:
+        run.finish()
 
 
 if __name__ == "__main__":
