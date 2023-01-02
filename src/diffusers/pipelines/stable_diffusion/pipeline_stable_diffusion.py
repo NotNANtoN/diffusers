@@ -936,7 +936,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 depth_map = self.depth_estimator(pixel_values).predicted_depth            
 
         depth_map = torch.nn.functional.interpolate(
-            depth_map.unsqueeze(1),
+            depth_map.squeeze().unsqueeze(0).unsqueeze(1),
             size=(height // self.vae_scale_factor, width // self.vae_scale_factor),
             mode="bicubic",
             align_corners=False,
