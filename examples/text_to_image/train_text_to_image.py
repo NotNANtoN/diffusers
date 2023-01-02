@@ -48,6 +48,12 @@ logger = get_logger(__name__)
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
+        "--num_experts",
+        type=int,
+        default=10,
+        help="Number of experts to use with LoRA",
+    )
+    parser.add_argument(
         "--lora_rank",
         type=int,
         default=0,
@@ -373,7 +379,7 @@ class EMAModel:
 
 
 @torch.inference_mode()
-def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pretrained_path, weight_dtype, revision, lora_rank):
+def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pretrained_path, weight_dtype, revision, lora_rank, num_experts):
     # get state dict
     state_dict = unet.state_dict()
     #print(unet.conv_in.bias[:5])
@@ -389,10 +395,12 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
     # create new model and load state dict into it
     new_unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
     if lora_rank > 0:
+        from lora_utils import UNetLORAMoDE
+        new_unet = UNetLORAMoDE(new_unet, num_experts=num_experts)
         #save_lora_weight(unet, "tmp/load_weights")
-        unet_lora_params, _ = inject_trainable_lora(
-                new_unet, r=lora_rank#, loras=args.resume_unet
-            )
+        #unet_lora_params, _ = inject_trainable_lora(
+        #        new_unet, r=lora_rank#, loras=args.resume_unet
+        #    )
     #else:
     new_unet.load_state_dict(new_state_dict, strict=True)
         
@@ -416,7 +424,7 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
         safety_checker=None,
         feature_extractor=None,     
         requires_safety_checker=False,
-    )
+    ).to(weight_dtype).to(accelerator.device)
     
     return pipe
     
@@ -506,24 +514,20 @@ def main():
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         
-        
-        
+           
     # add LoRA
     if args.lora_rank > 0:
-        unet.requires_grad_(False)
-        unet_lora_params, _ = inject_trainable_lora(
-            unet, r=args.lora_rank#, loras=args.resume_unet
-        )
-        opt_params = itertools.chain(*unet_lora_params)
+        from lora_utils import UNetLORAMoDE
+        unet = UNetLORAMoDE(unet, num_experts=args.num_experts)
+        opt_params = itertools.chain(*itertools.chain(*unet.expert_weights))
         
-        for _up, _down in extract_lora_ups_down(unet):
-            print("Before training: Unet First Layer lora up", _up.weight.data)
-            print("Before training: Unet First Layer lora down", _down.weight.data)
-            break
+        #unet.requires_grad_(False)
+        #unet_lora_params, _ = inject_trainable_lora(
+        #    unet, r=args.lora_rank#, loras=args.resume_unet
+        #)
+        #opt_params = itertools.chain(*unet_lora_params)
     else:
         opt_params = unet.parameters()
-
-    
 
     if args.scale_lr:
         args.learning_rate = (
@@ -754,9 +758,10 @@ def main():
     progress_bar.set_description("Steps")
     global_step = 0
     
-    eval_every = 200 * args.gradient_accumulation_steps
+    eval_every = 20 * args.gradient_accumulation_steps
     save_every = 1000 * args.gradient_accumulation_steps
-
+    
+    
     for epoch in range(args.num_train_epochs):
         unet.train()
         train_loss = 0.0
@@ -770,8 +775,13 @@ def main():
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
-                timesteps = timesteps.long()
+                if args.lora_rank > 0:
+                    # when using mixture of denoising experts then we need to pass the same timestep for all batch elemenets as only one expert operates on them
+                    timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (1,), device=latents.device, dtype=torch.int64).repeat(bsz)
+                    timesteps = timesteps.long()
+                else:
+                    timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
+                    timesteps = timesteps.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
@@ -835,7 +845,8 @@ def main():
                                           args.pretrained_model_name_or_path,
                                           weight_dtype,
                                           args.revision,
-                                          args.lora_rank
+                                          args.lora_rank,
+                                          args.num_experts
                                          )
 
 
@@ -880,7 +891,8 @@ def main():
                                               args.pretrained_model_name_or_path,
                                               weight_dtype,
                                               args.revision,
-                                              args.lora_rank
+                                              args.lora_rank,
+                                              args.num_experts
                                              )
 
                         os.makedirs(save_folder, exist_ok=True)
@@ -897,7 +909,10 @@ def main():
                               text_encoder, vae,  
                               args.pretrained_model_name_or_path,
                               weight_dtype,
-                              args.revision)
+                              args.revision,
+                              args.lora_rank,
+                              args.num_experts
+                             )
         save_folder = os.path.join(args.output_dir, f"final_model_at_{global_step}")
         os.makedirs(save_folder, exist_ok=True)
         pipe.save_pretrained(save_folder)

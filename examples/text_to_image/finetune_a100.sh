@@ -14,6 +14,8 @@ accelerate launch --mixed_precision="bf16" train_text_to_image.py \
   --max_files=2000 \
   --max_width=1024 \
   --max_height=768 \
-  --hub_token="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"
+  --hub_token="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" \
+  --lora_rank 0
+
 
 #  --use_ema \
