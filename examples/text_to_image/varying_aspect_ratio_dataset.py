@@ -110,14 +110,13 @@ class BucketDataset(Dataset):
         self.tokenizer = tokenizer
         self.to_tensor = torchvision.transforms.ToTensor()
         self.norm = torchvision.transforms.Normalize([0.5], [0.5])
-        
+        self.invalid_idcs = set()
+
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, i):        
         img = None
-        invalid_idcs = []
-            
         while img is None:
             row = self.df.iloc[i]
             try:
@@ -137,10 +136,10 @@ class BucketDataset(Dataset):
                 img = self.to_tensor(pil_img)
             except OSError:
                 print(f"Could not load {row.img_path}")
-                invalid_idcs.append(i)
+                self.invalid_idcs.add(i)
                 # get different random idx from same bucket
                 bucket_rows = self.df[(self.df.bucket_width == row.bucket_width) & (self.df.bucket_height == row.bucket_height)]
-                bucket_idcs = [idx for idx in bucket_rows.index.to_numpy() if idx not in set(invalid_idcs)]
+                bucket_idcs = [idx for idx in bucket_rows.index.to_numpy() if idx not in self.invalid_idcs]
                 i = np.random.choice(bucket_idcs, 1)[0]
                 
         # resize...
@@ -200,21 +199,19 @@ class BucketBatchSampler(Sampler):
 class BucketSampler(Sampler):
     def __init__(self, bucket_assignments, batch_size):
         # put ids into the buckets
-        bucketed_idcs = []
+        self.bucketed_idcs = []
         for idx in sorted(np.unique(bucket_assignments)):
-            bucketed_idcs.append(np.where(bucket_assignments == idx)[0])
+            self.bucketed_idcs.append(np.where(bucket_assignments == idx)[0])
 
+        self.num_buckets = len(self.bucketed_idcs)
         self.batch_size = batch_size
-        self.bucketed_idcs = bucketed_idcs
-        self.bucket_ids = np.arange(len(bucketed_idcs))
+        self.bucket_ids = np.arange(self.num_buckets)
         self.bucket_sizes = torch.tensor([len(b) for b in self.bucketed_idcs]).float()
         self.total_items = sum(self.bucket_sizes)
         self.num_batches = int(np.ceil(self.total_items / batch_size))
         
-        self.idcs = np.arange(len(bucketed_idcs))
+        self.idcs = np.arange(self.num_buckets)
         
-        #self.sampler = self
-
     def batch_count(self):
         return self.num_batches
 
@@ -226,21 +223,18 @@ class BucketSampler(Sampler):
         return bucket_idx
 
     def __iter__(self):
-        count = 0
-        
+        # choose start bucket
         bucket_idx = self.sample_bucket()
         bucket_idcs = self.bucketed_idcs[bucket_idx]
-        
+        count = 0
         for _ in range(self.num_batches):
+            sampled_idx = np.random.choice(bucket_idcs, 1)[0]
+        
             count += 1
-
-            batch_idx = np.random.choice(bucket_idcs, 1)[0]
-            
             if count == self.batch_size:
                 # choose new bucket
                 bucket_idx = self.sample_bucket()
                 bucket_idcs = self.bucketed_idcs[bucket_idx]
                 
-            yield batch_idx
-    
+            yield sampled_idx
     

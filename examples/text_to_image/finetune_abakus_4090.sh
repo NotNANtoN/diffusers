@@ -16,10 +16,11 @@ accelerate launch --mixed_precision="bf16" train_text_to_image.py \
   --gradient_checkpointing \
   --lora_rank 4 \
   --learning_rate=1e-04 \
-  --num_experts 10
+  --num_experts 10 \
+  --use_ema \
+  --ema_decay 0.999
+  
 
-
-#  --use_ema \
 #  --compile \
 #  --lr_scheduler="cosine_with_restarts" --lr_warmup_steps=300 \
 #  --learning_rate=1e-06 \
