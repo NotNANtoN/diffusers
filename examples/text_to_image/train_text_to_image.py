@@ -243,6 +243,7 @@ def parse_args():
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
     )
     parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
+    parser.add_argument("--ema_deacy", type=float, default=0.9999, help="EMA decay value")
     parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
     parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
     parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
@@ -344,10 +345,10 @@ class EMAModel:
 
         for s_param, param in zip(self.shadow_params, parameters):
             if param.requires_grad:
-                tmp = self.decay * (s_param - param)
+                tmp = self.decay * (s_param - param.cpu())
                 s_param.sub_(tmp)
-            else:
-                s_param.copy_(param)
+            #else:
+            #    s_param.copy_(param)
 
         torch.cuda.empty_cache()
 
@@ -363,7 +364,7 @@ class EMAModel:
         """
         parameters = list(parameters)
         for s_param, param in zip(self.shadow_params, parameters):
-            param.data.copy_(s_param.data)
+            param.data.copy_(s_param.data.to(param.data.device))
 
     def to(self, device=None, dtype=None) -> None:
         r"""Move internal buffers of the ExponentialMovingAverage to `device`.
@@ -402,15 +403,15 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
         #        new_unet, r=lora_rank#, loras=args.resume_unet
         #    )
     #else:
-    new_unet.load_state_dict(new_state_dict, strict=True)
+    
+    if use_ema:
+        ema_unet.copy_to(new_unet.parameters())
+    else:
+        new_unet.load_state_dict(new_state_dict, strict=True)
         
     new_unet.to(weight_dtype)
     new_unet.eval()
     new_unet.to(accelerator.device)
-
-    
-    if use_ema:
-        ema_unet.copy_to(new_unet.parameters())
     
     tokenizer = CLIPTokenizer.from_pretrained(pretrained_path, subfolder="tokenizer", revision=revision)
     scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_path, subfolder="scheduler", revision=revision)
@@ -725,7 +726,8 @@ def main():
 
     # Create EMA for the unet.
     if args.use_ema:
-        ema_unet = EMAModel(unet.parameters())
+        ema_unet = EMAModel(unet.parameters(), args.ema_decay)
+        ema_unet.to("cpu")
     else:
         ema_unet = None
 
