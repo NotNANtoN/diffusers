@@ -5,6 +5,7 @@ import os
 import random
 from pathlib import Path
 from typing import Iterable, Optional
+import itertools
 import sys
 sys.path.append("../../src")
 
@@ -28,6 +29,16 @@ from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
 
+try:
+    from lora_diffusion import (
+        extract_lora_ups_down,
+        inject_trainable_lora,
+        save_lora_weight,
+        save_safeloras,
+    )
+except Exception:
+    print("Could not load LoRA")
+
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.10.0.dev0")
 
@@ -36,6 +47,12 @@ logger = get_logger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=0,
+        help="Rank of LoRA approximation. If 0, no LoRA is used",
+    )
     parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
@@ -356,7 +373,7 @@ class EMAModel:
 
 
 @torch.inference_mode()
-def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pretrained_path, weight_dtype, revision):
+def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pretrained_path, weight_dtype, revision, lora_rank):
     # get state dict
     state_dict = unet.state_dict()
     #print(unet.conv_in.bias[:5])
@@ -371,8 +388,15 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
     del state_dict
     # create new model and load state dict into it
     new_unet = UNet2DConditionModel.from_pretrained(pretrained_path, subfolder="unet")
-    new_unet.to(weight_dtype)
+    if lora_rank > 0:
+        #save_lora_weight(unet, "tmp/load_weights")
+        unet_lora_params, _ = inject_trainable_lora(
+                new_unet, r=lora_rank#, loras=args.resume_unet
+            )
+    #else:
     new_unet.load_state_dict(new_state_dict, strict=True)
+        
+    new_unet.to(weight_dtype)
     new_unet.eval()
     new_unet.to(accelerator.device)
 
@@ -481,6 +505,25 @@ def main():
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
+        
+        
+        
+    # add LoRA
+    if args.lora_rank > 0:
+        unet.requires_grad_(False)
+        unet_lora_params, _ = inject_trainable_lora(
+            unet, r=args.lora_rank#, loras=args.resume_unet
+        )
+        opt_params = itertools.chain(*unet_lora_params)
+        
+        for _up, _down in extract_lora_ups_down(unet):
+            print("Before training: Unet First Layer lora up", _up.weight.data)
+            print("Before training: Unet First Layer lora down", _down.weight.data)
+            break
+    else:
+        opt_params = unet.parameters()
+
+    
 
     if args.scale_lr:
         args.learning_rate = (
@@ -501,7 +544,7 @@ def main():
         optimizer_cls = torch.optim.AdamW
 
     optimizer = optimizer_cls(
-        unet.parameters(),
+        opt_params,
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -760,27 +803,28 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+                
+                
+                current_lr = lr_scheduler.get_last_lr()[0]
+                logs = {"step_loss": loss.detach().item(), "lr": current_lr}
+                progress_bar.set_postfix(**logs)
                     
                 if accelerator.sync_gradients:
                     if args.use_ema:
                         ema_unet.step(unet.parameters())
                     progress_bar.update(1)
                     global_step += 1
-                    accelerator.log({"train_loss": train_loss}, step=global_step)
+                    # log learning rate
+                    accelerator.log({"train_loss": train_loss, "lr": current_lr}, step=global_step)
                     train_loss = 0.0
 
-                current_lr = lr_scheduler.get_last_lr()[0]
-                logs = {"step_loss": loss.detach().item(), "lr": current_lr}
-                progress_bar.set_postfix(**logs)
+                
 
                 if global_step >= args.max_train_steps:
                     break
                 
             # evaluate model regularly
-            if accelerator.is_local_main_process:
-                # log learning rate
-                wandb.log({"lr": current_lr})
-                
+            if accelerator.is_local_main_process:            
                 if step % eval_every == 0:
                     gen_dir = os.path.join(args.output_dir, "generations", f"{global_step}")
                     os.makedirs(gen_dir, exist_ok=True)
@@ -790,7 +834,9 @@ def main():
                                           text_encoder, vae,  
                                           args.pretrained_model_name_or_path,
                                           weight_dtype,
-                                          args.revision)
+                                          args.revision,
+                                          args.lora_rank
+                                         )
 
 
                     prompts = ["full body portrait of Dilraba, slight smile, diffuse natural sun lights, autumn lights, highly detailed, digital painting, artstation, concept art, sharp focus, illustration",
@@ -819,20 +865,27 @@ def main():
                             out_dict[f"{width}x{height}/{i}"] = wandb.Image(pil_img)
                             pil_img.save(img_path)
 
-                    wandb.log(out_dict)
+                    accelerator.log(out_dict, step=global_step)
                     del pipe
         
                 if step > 5 and step % save_every == 0:
-                    pipe = models_to_pipe(accelerator, args.use_ema,
-                                          unet, ema_unet, 
-                                          text_encoder, vae,  
-                                          args.pretrained_model_name_or_path,
-                                          weight_dtype,
-                                          args.revision)
                     save_folder = os.path.join(args.output_dir, f"model_at_{global_step}")
-                    os.makedirs(save_folder, exist_ok=True)
-                    pipe.save_pretrained(save_folder)
-                    del pipe
+                    
+                    if args.lora_rank > 0:
+                        save_lora_weight(unet, save_folder.replace("model_at", "lora_at"))
+                    else:
+                        pipe = models_to_pipe(accelerator, args.use_ema,
+                                              unet, ema_unet, 
+                                              text_encoder, vae,  
+                                              args.pretrained_model_name_or_path,
+                                              weight_dtype,
+                                              args.revision,
+                                              args.lora_rank
+                                             )
+
+                        os.makedirs(save_folder, exist_ok=True)
+                        pipe.save_pretrained(save_folder)
+                        del pipe
                     
         
             
