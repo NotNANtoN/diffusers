@@ -243,7 +243,7 @@ def parse_args():
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
     )
     parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
-    parser.add_argument("--ema_deacy", type=float, default=0.9999, help="EMA decay value")
+    parser.add_argument("--ema_decay", type=float, default=0.9999, help="EMA decay value")
     parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
     parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
     parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
@@ -364,7 +364,7 @@ class EMAModel:
         """
         parameters = list(parameters)
         for s_param, param in zip(self.shadow_params, parameters):
-            param.data.copy_(s_param.data.to(param.data.device))
+            param.data.copy_(s_param.data.to(param.device))
 
     def to(self, device=None, dtype=None) -> None:
         r"""Move internal buffers of the ExponentialMovingAverage to `device`.
@@ -405,7 +405,11 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
     #else:
     
     if use_ema:
+        #if lora_rank > 0:
+        #    new_unet.expert_weights = ema_unet.expert_weights.cuda()
+        #else:
         ema_unet.copy_to(new_unet.parameters())
+        
     else:
         new_unet.load_state_dict(new_state_dict, strict=True)
         
@@ -430,6 +434,85 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
     return pipe
     
     
+def save_model(unet, ema_unet, accelerator, text_encoder, vae, weight_dtype, args, global_step, 
+               save_ema=False,
+               ):        
+    save_folder = os.path.join(args.output_dir, f"final_model_at_{global_step}")
+    if args.lora_rank > 0:
+        save_folder = os.path.join(args.output_dir, "lora_weights")
+        os.makedirs(save_folder, exist_ok=True)
+        save_path = os.path.join(save_folder, f"final_weights.pt")
+        torch.save(unet.expert_weights, save_path)
+
+        if args.use_ema:
+            ema_unet.copy_to(unet.parameters())
+            save_path_ema = os.path.join(save_folder, f"final_weights_ema.pt")
+            torch.save(unet.expert_weights, save_path_ema)
+    else:
+        pipe = models_to_pipe(accelerator, args.use_ema,
+                              unet, ema_unet, 
+                              text_encoder, vae,  
+                              args.pretrained_model_name_or_path,
+                              weight_dtype,
+                              args.revision,
+                              args.lora_rank,
+                              args.num_experts
+                             )
+
+        os.makedirs(save_folder, exist_ok=True)
+        pipe.save_pretrained(save_folder)
+
+
+        if args.push_to_hub:
+            repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
+    
+    
+def generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator, weight_dtype, args,
+                    use_ema_model=False, suffix=""):
+    gen_dir = os.path.join(args.output_dir, f"generations{suffix}", f"{global_step}")
+    os.makedirs(gen_dir, exist_ok=True)
+
+    use_ema_model = use_ema_model and args.use_ema
+    pipe = models_to_pipe(accelerator, use_ema_model,
+                          unet, ema_unet, 
+                          text_encoder, vae,  
+                          args.pretrained_model_name_or_path,
+                          weight_dtype,
+                          args.revision,
+                          args.lora_rank,
+                          args.num_experts
+                         )
+
+    prompts = ["full body portrait of Dilraba, slight smile, diffuse natural sun lights, autumn lights, highly detailed, digital painting, artstation, concept art, sharp focus, illustration",
+               "cyborg woman| with a visible detailed brain| muscles cable wires| biopunk| cybernetic| cyberpunk| white marble bust| canon m50| 100mm| sharp focus| smooth| hyperrealism| highly detailed| intricate details| carved by michelangelo",
+               "Goldorg, demonic orc from Moria, new leader of the Gundabad, strong muscular body, ugly figure, dirty grey skin, burned wrinkled face, body interlaced with frightening armor, metal coatings crossing head, heavy muscular figure, cinematic shot, detailed, trending on Artstation, dark blueish environment, demonic backlight, unreal engine, 8k",
+               "Boris Johnson as smiling Rick Sanchez from Rick and Morty, unibrow, white robe, big eyes, realistic portrait, symmetrical, highly detailed, digital painting, artstation, concept art, smooth, sharp focus, illustration, cinematic lighting, art by artgerm and greg rutkowski and alphonse mucha",
+               "Slavic dog head man, woolen torso in medieval clothes, characteristic of cynocephaly, oil painting, hyperrealism, beautiful, high resolution, trending on artstation",
+               "Jesus taking a selfie, instagram, high detail, glamorous photograph, natural lighting",
+              ]
+
+    out_dict = {}
+    if args.max_width > 256:
+        resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
+    else:
+        resolutions = [(128, 128), (64, 64), (128, 64), (64, 128)]
+    for width, height in resolutions:
+        for i, p in enumerate(prompts):
+            pil_img = pipe(p, output_type="pil", num_inference_steps=30,
+                    guidance_scale=10, seed=11,
+                    width=width, height=height,
+              )[0][0]
+            # save locally
+            img_name = f"{i}_{width}x{height}.jpg"
+            img_path = os.path.join(gen_dir, img_name)
+            pil_img.save(img_path)
+            # log to wandb
+            out_dict[f"{width}x{height}/{i}{suffix}"] = wandb.Image(pil_img)
+    # upload log
+    accelerator.log(out_dict, step=global_step)
+    del pipe
+
+
 def main():
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
@@ -760,8 +843,8 @@ def main():
     progress_bar.set_description("Steps")
     global_step = 0
     
-    eval_every = 20 * args.gradient_accumulation_steps
-    save_every = 1000 * args.gradient_accumulation_steps
+    eval_every = 50 * args.gradient_accumulation_steps
+    save_every = 50 * args.gradient_accumulation_steps
     
     
     for epoch in range(args.num_train_epochs):
@@ -838,90 +921,18 @@ def main():
             # evaluate model regularly
             if accelerator.is_local_main_process:            
                 if step % eval_every == 0:
-                    gen_dir = os.path.join(args.output_dir, "generations", f"{global_step}")
-                    os.makedirs(gen_dir, exist_ok=True)
-        
-                    pipe = models_to_pipe(accelerator, args.use_ema,
-                                          unet, ema_unet, 
-                                          text_encoder, vae,  
-                                          args.pretrained_model_name_or_path,
-                                          weight_dtype,
-                                          args.revision,
-                                          args.lora_rank,
-                                          args.num_experts
-                                         )
-
-
-                    prompts = ["full body portrait of Dilraba, slight smile, diffuse natural sun lights, autumn lights, highly detailed, digital painting, artstation, concept art, sharp focus, illustration",
-                               "cyborg woman| with a visible detailed brain| muscles cable wires| biopunk| cybernetic| cyberpunk| white marble bust| canon m50| 100mm| sharp focus| smooth| hyperrealism| highly detailed| intricate details| carved by michelangelo",
-                               "Goldorg, demonic orc from Moria, new leader of the Gundabad, strong muscular body, ugly figure, dirty grey skin, burned wrinkled face, body interlaced with frightening armor, metal coatings crossing head, heavy muscular figure, cinematic shot, detailed, trending on Artstation, dark blueish environment, demonic backlight, unreal engine, 8k",
-                               "Boris Johnson as smiling Rick Sanchez from Rick and Morty, unibrow, white robe, big eyes, realistic portrait, symmetrical, highly detailed, digital painting, artstation, concept art, smooth, sharp focus, illustration, cinematic lighting, art by artgerm and greg rutkowski and alphonse mucha",
-                               "Slavic dog head man, woolen torso in medieval clothes, characteristic of cynocephaly, oil painting, hyperrealism, beautiful, high resolution, trending on artstation",
-                               "Jesus taking a selfie, instagram, high detail, glamorous photograph, natural lighting",
-                              ]
-
-                    out_dict = {}
-                    
-                    if args.max_width > 256:
-                        resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
-                    else:
-                        resolutions = [(128, 128), (64, 64), (128, 64), (64, 128)]
-                    for width, height in resolutions:
-                        for i, p in enumerate(prompts):
-                            pil_img = pipe(p, output_type="pil", num_inference_steps=30,
-                                    guidance_scale=10, seed=11,
-                                    width=width, height=height,
-                              )[0][0]
-                            img_name = f"{i}_{width}x{height}.jpg"
-                            img_path = os.path.join(gen_dir, img_name)
-
-                            out_dict[f"{width}x{height}/{i}"] = wandb.Image(pil_img)
-                            pil_img.save(img_path)
-
-                    accelerator.log(out_dict, step=global_step)
-                    del pipe
+                    generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator, weight_dtype, args, use_ema_model=False, suffix="")
+                    generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator, weight_dtype, args, use_ema_model=True, suffix="_ema")
         
                 if step > 5 and step % save_every == 0:
-                    save_folder = os.path.join(args.output_dir, f"model_at_{global_step}")
-                    
-                    if args.lora_rank > 0:
-                        save_lora_weight(unet, save_folder.replace("model_at", "lora_at"))
-                    else:
-                        pipe = models_to_pipe(accelerator, args.use_ema,
-                                              unet, ema_unet, 
-                                              text_encoder, vae,  
-                                              args.pretrained_model_name_or_path,
-                                              weight_dtype,
-                                              args.revision,
-                                              args.lora_rank,
-                                              args.num_experts
-                                             )
-
-                        os.makedirs(save_folder, exist_ok=True)
-                        pipe.save_pretrained(save_folder)
-                        del pipe
+                    save_model(unet, ema_unet, accelerator, text_encoder, vae, weight_dtype, args, global_step, save_ema=False)
                     
         
             
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        pipe = models_to_pipe(accelerator, args.use_ema,
-                              unet, ema_unet, 
-                              text_encoder, vae,  
-                              args.pretrained_model_name_or_path,
-                              weight_dtype,
-                              args.revision,
-                              args.lora_rank,
-                              args.num_experts
-                             )
-        save_folder = os.path.join(args.output_dir, f"final_model_at_{global_step}")
-        os.makedirs(save_folder, exist_ok=True)
-        pipe.save_pretrained(save_folder)
-
-
-        if args.push_to_hub:
-            repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
+        save_model(unet, ema_unet, accelerator, text_encoder, vae, weight_dtype, args, global_step, save_ema=True)
 
     accelerator.end_training()
     # finish logging
