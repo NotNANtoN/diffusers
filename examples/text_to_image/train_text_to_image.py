@@ -441,12 +441,12 @@ def save_model(unet, ema_unet, accelerator, text_encoder, vae, weight_dtype, arg
     if args.lora_rank > 0:
         save_folder = os.path.join(args.output_dir, "lora_weights")
         os.makedirs(save_folder, exist_ok=True)
-        save_path = os.path.join(save_folder, f"final_weights.pt")
+        save_path = os.path.join(save_folder, f"fweights_at_{global_step}.pt")
         torch.save(unet.expert_weights, save_path)
 
         if args.use_ema:
             ema_unet.copy_to(unet.parameters())
-            save_path_ema = os.path.join(save_folder, f"final_weights_ema.pt")
+            save_path_ema = os.path.join(save_folder, f"weights_at_{global_step}_ema.pt")
             torch.save(unet.expert_weights, save_path_ema)
     else:
         pipe = models_to_pipe(accelerator, args.use_ema,
@@ -514,6 +514,8 @@ def generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator,
 
 
 def main():
+    torch.backends.cudnn.benchmark = False
+    
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
     
