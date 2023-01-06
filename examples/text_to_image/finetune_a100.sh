@@ -18,4 +18,4 @@ accelerate launch --mixed_precision="bf16" train_text_to_image.py \
   --learning_rate=3e-04 \
   --num_experts 10 \
   --use_ema \
-  --ema_decay 0.999
+  --ema_decay 0.99
