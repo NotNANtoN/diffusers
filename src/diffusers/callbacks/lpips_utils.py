@@ -1,5 +1,4 @@
 import torch
-import lpips
 import torch.nn.functional as F
 
 
@@ -35,6 +34,7 @@ class LPIPSLoss:
     def __init__(self, lpips_net="vgg", batch_size=1, use_aug_assuming_equal_img_shape=False):
         self.use_aug_assuming_equal_img_shape = use_aug_assuming_equal_img_shape
         self.lpips_transform = MakeCutoutsRHW(224)
+        import lpips
         self.lpips_loss_fn = lpips.LPIPS(net=lpips_net)
         self.batch_size = batch_size
         

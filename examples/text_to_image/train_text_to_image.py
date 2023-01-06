@@ -601,6 +601,8 @@ def main():
         unet.enable_gradient_checkpointing()
         
            
+    unet.set_attention_slice(2)
+            
     # add LoRA
     if args.lora_rank > 0:
         from lora_utils import UNetLORAMoDE

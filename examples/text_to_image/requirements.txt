@@ -5,3 +5,5 @@ datasets
 ftfy
 tensorboard
 modelcards
+git+https://github.com/NotNANtoN/lora.git
+bitsandbytes
