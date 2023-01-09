@@ -220,12 +220,16 @@ class StableDiffusionPipeline(DiffusionPipeline):
         self.register_to_config(requires_safety_checker=requires_safety_checker)
         
         self.compile_dir = None
+        self.use_compiled = False
         self.in_channels = self.unet.in_channels
+        
+        self.device_tracker = torch.rand(1)
         
         
     def compile_models(self, compile_dir, width=512, height=512):
         self.compile_dir = compile_dir
         if self.compile_dir is not None:
+            self.use_compiled = True
             if not os.path.exists(self.compile_dir) or not os.path.exists(os.path.join(self.compile_dir, "UNet2DConditionModel")):
                 from .compile import compile_diffusers
                 compile_diffusers("", width, height, 77, 1, save_path=compile_dir, pipe=self)
@@ -255,23 +259,47 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     model_name="AutoencoderKL", workdir=self.compile_dir
                 )
                 
-    def to(self, device, *args, **kwargs):
-        super().to(device, *args, **kwargs)
+    def to(self, *args, exclude_text=False, **kwargs):
+        self.device_tracker = self.device_tracker.to(*args, **kwargs)
+        self._device = self.device_tracker.device
+        self.input_type = self.device_tracker.dtype
+        possible_models = [self.unet, self.vae]
+        if not exclude_text:
+            possible_models.append(self.text_encoder)
+        models = [m for m in possible_models if m is not None]
+        for m in models:
+            m.to(*args, **kwargs)
+        return self
+        
+        #super().to(device, *args, **kwargs)
         # atm we cannot move compiled models to CPU unfortunately :( 
         #if hasattr(self, "clip_ait_exe"):
         #    self.clip_ait_exe.to(device, *args, **kwargs)
         #    self.unet_ait_exe.to(device, *args, **kwargs)
         #    self.vae_ait_exe.to(device, *args, **kwargs)
-        return self
-            
-    def del_pt_models(self):
-        # delete models. keep vae for encoding
-        self.unet.to("cpu")
+        #return self
+        
+    @property
+    def device(self) -> torch.device:
+        return self._device
+        
+    def del_text_model(self):
         self.text_encoder.to("cpu")
+        del self.text_encoder
+        self.text_encoder = None
+        
+    def del_pt_models(self):
+        # delete models to only use compiled version. keep vae encoder for encoding imgs
+        self.unet.to("cpu")
         self.vae.decoder.to("cpu")
         del self.unet
-        del self.text_encoder
         del self.vae.decoder
+        self.unet = None
+        self.vae.decoder = None
+        if hasattr(self, "text_encoder"):
+            self.text_encoder.to("cpu")
+            del self.text_encoder
+            self.text_encoder = None
             
     def init_ait_module(
         self,
@@ -717,11 +745,12 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     latent_model_input = torch.cat([latent_model_input, depth_mask], dim=1)
 
                 # predict the noise residual
-                if self.compile_dir is None:
-                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
-                else:
+                if self.use_compiled:
                     # predict the noise residual
                     noise_pred = self.unet_inference(latent_model_input, t, encoder_hidden_states=text_embeddings)
+                else:
+                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+                    
                 
                 # perform guidance
                 if do_classifier_free_guidance:
@@ -846,11 +875,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 )
                 text_input_ids = text_input_ids[:, : self.tokenizer.model_max_length]
             
-            if self.compile_dir is None:
-                text_embedding = self.text_encoder(text_input_ids.to(device))[0]
-            else:
-                #text_embeddings = self.clip_inference(text_input.input_ids.to(self.device))
+            if self.use_compiled:
                 text_embedding = self.clip_inference(text_input_ids.to(device))
+            else:
+                text_embedding = self.text_encoder(text_input_ids.to(device))[0]                
             
             text_embeddings.append(text_embedding)
         if weights is None:
@@ -898,10 +926,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
         if output_type == "latent":
             return latents.detach().cpu()
         latents = latents / 0.18215
-        if self.compile_dir is None:
-            image = self.vae.decode(latents.to(device))["sample"]
-        else:
+        if self.use_compiled:
             image = self.vae_inference(latents.to(device))
+        else:
+            image = self.vae.decode(latents.to(device))["sample"]
+            
         image = (image / 2 + 0.5).float().clamp(0, 1)
         image = image.cpu()
         
