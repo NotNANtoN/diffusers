@@ -225,6 +225,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
         
         self.device_tracker = torch.rand(1)
         
+        self.uncond_embeddings_table = {}
+        
         
     def compile_models(self, compile_dir, width=512, height=512):
         self.compile_dir = compile_dir
@@ -266,6 +268,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
         possible_models = [self.unet, self.vae]
         if not exclude_text:
             possible_models.append(self.text_encoder)
+        if hasattr(self, "depth_estimator"):
+            possible_models.append(self.depth_estimator)
         models = [m for m in possible_models if m is not None]
         for m in models:
             m.to(*args, **kwargs)
@@ -471,6 +475,24 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance:
+            # embed negative prompt
+            uncond_embeddings = self.init_uncond_embeddings(negative_prompt, device).to(text_embeddings.device)
+
+            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
+            seq_len = uncond_embeddings.shape[1]
+            uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
+            uncond_embeddings = uncond_embeddings.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+            # For classifier free guidance, we need to do two forward passes.
+            # Here we concatenate the unconditional and text embeddings into a single batch
+            # to avoid doing two forward passes
+            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+        return text_embeddings
+    
+    def init_uncond_embeddings(self, negative_prompt, device="cuda"):        
+        if negative_prompt in self.uncond_embeddings_table:
+            uncond_embeddings = self.uncond_embeddings_table[negative_prompt]
+        else:
             uncond_tokens: List[str]
             if negative_prompt is None:
                 uncond_tokens = [""] * batch_size
@@ -503,17 +525,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 attention_mask=attention_mask,
             )
             uncond_embeddings = uncond_embeddings[0]
-
-            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
-            seq_len = uncond_embeddings.shape[1]
-            uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
-            uncond_embeddings = uncond_embeddings.view(batch_size * num_images_per_prompt, seq_len, -1)
-
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
-            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-        return text_embeddings
+            self.uncond_embeddings_table[negative_prompt] = uncond_embeddings.cpu()
+        return uncond_embeddings
 
     def run_safety_checker(self, image, device, dtype):
         if self.safety_checker is not None:
@@ -848,7 +861,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
         timesteps_tensor = self.scheduler.timesteps[t_start:].to(device)
         return latents, init_latents, timesteps_tensor, noise
     
-    def sample_noise(self, width=512, height=512, batch_size=1, generator=None, dtype=None, device="cpu"):
+    def sample_noise(self, width=512, height=512, batch_size=1, generator=None, dtype=None, device="cpu", seed=None):
+        if seed is not None:
+            generator = torch.Generator()
+            generator.manual_seed(seed)
         latents = torch.randn(batch_size, self.in_channels,
                                   height // 8, width // 8, generator=generator, device=device, dtype=dtype)
         return latents
