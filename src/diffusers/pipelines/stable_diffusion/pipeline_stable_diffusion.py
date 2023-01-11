@@ -25,7 +25,7 @@ import PIL
 
 from diffusers.utils import is_accelerate_available
 from packaging import version
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer, DPTForDepthEstimation
 
 from ...configuration_utils import FrozenDict
 from ...models import AutoencoderKL, UNet2DConditionModel
@@ -38,10 +38,9 @@ from ...schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-from ...utils import deprecate, logging
+from ...utils import deprecate, logging, PIL_INTERPOLATION
 from . import StableDiffusionPipelineOutput
 from .safety_checker import StableDiffusionSafetyChecker
-
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -133,9 +132,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
             EulerAncestralDiscreteScheduler,
             DPMSolverMultistepScheduler,
         ],
-        safety_checker: StableDiffusionSafetyChecker,
-        feature_extractor: CLIPFeatureExtractor,
-        requires_safety_checker: bool = True,
+        safety_checker: StableDiffusionSafetyChecker = None,
+        feature_extractor: CLIPFeatureExtractor = None,
+        requires_safety_checker: bool = False,
+        depth_estimator: DPTForDepthEstimation = None,
     ):
         super().__init__()
 
@@ -203,6 +203,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
             new_config["sample_size"] = 64
             unet._internal_dict = FrozenDict(new_config)
 
+        extra_modules = {}
+        #if depth_estimator is not None:
+        extra_modules["depth_estimator"] = depth_estimator
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -211,17 +214,24 @@ class StableDiffusionPipeline(DiffusionPipeline):
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
+            **extra_modules
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
         
         self.compile_dir = None
+        self.use_compiled = False
         self.in_channels = self.unet.in_channels
+        
+        self.device_tracker = torch.rand(1)
+        
+        self.uncond_embeddings_table = {}
         
         
     def compile_models(self, compile_dir, width=512, height=512):
         self.compile_dir = compile_dir
         if self.compile_dir is not None:
+            self.use_compiled = True
             if not os.path.exists(self.compile_dir) or not os.path.exists(os.path.join(self.compile_dir, "UNet2DConditionModel")):
                 from .compile import compile_diffusers
                 compile_diffusers("", width, height, 77, 1, save_path=compile_dir, pipe=self)
@@ -251,23 +261,49 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     model_name="AutoencoderKL", workdir=self.compile_dir
                 )
                 
-    def to(self, device, *args, **kwargs):
-        super().to(device, *args, **kwargs)
+    def to(self, *args, exclude_text=False, **kwargs):
+        self.device_tracker = self.device_tracker.to(*args, **kwargs)
+        self._device = self.device_tracker.device
+        self.input_type = self.device_tracker.dtype
+        possible_models = [self.unet, self.vae]
+        if not exclude_text:
+            possible_models.append(self.text_encoder)
+        if hasattr(self, "depth_estimator"):
+            possible_models.append(self.depth_estimator)
+        models = [m for m in possible_models if m is not None]
+        for m in models:
+            m.to(*args, **kwargs)
+        return self
+        
+        #super().to(device, *args, **kwargs)
         # atm we cannot move compiled models to CPU unfortunately :( 
         #if hasattr(self, "clip_ait_exe"):
         #    self.clip_ait_exe.to(device, *args, **kwargs)
         #    self.unet_ait_exe.to(device, *args, **kwargs)
         #    self.vae_ait_exe.to(device, *args, **kwargs)
-        return self
-            
-    def del_pt_models(self):
-        # delete models. keep vae for encoding
-        self.unet.to("cpu")
+        #return self
+        
+    @property
+    def device(self) -> torch.device:
+        return self._device
+        
+    def del_text_model(self):
         self.text_encoder.to("cpu")
+        del self.text_encoder
+        self.text_encoder = None
+        
+    def del_pt_models(self):
+        # delete models to only use compiled version. keep vae encoder for encoding imgs
+        self.unet.to("cpu")
         self.vae.decoder.to("cpu")
         del self.unet
-        del self.text_encoder
         del self.vae.decoder
+        self.unet = None
+        self.vae.decoder = None
+        if hasattr(self, "text_encoder"):
+            self.text_encoder.to("cpu")
+            del self.text_encoder
+            self.text_encoder = None
             
     def init_ait_module(
         self,
@@ -357,7 +393,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         device = torch.device(f"cuda:{gpu_id}")
 
-        for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae]:
+        for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae, self.depth_estimator]:
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
 
@@ -439,6 +475,24 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance:
+            # embed negative prompt
+            uncond_embeddings = self.init_uncond_embeddings(negative_prompt, device).to(text_embeddings.device)
+
+            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
+            seq_len = uncond_embeddings.shape[1]
+            uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
+            uncond_embeddings = uncond_embeddings.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+            # For classifier free guidance, we need to do two forward passes.
+            # Here we concatenate the unconditional and text embeddings into a single batch
+            # to avoid doing two forward passes
+            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+        return text_embeddings
+    
+    def init_uncond_embeddings(self, negative_prompt, device="cuda"):        
+        if negative_prompt in self.uncond_embeddings_table:
+            uncond_embeddings = self.uncond_embeddings_table[negative_prompt]
+        else:
             uncond_tokens: List[str]
             if negative_prompt is None:
                 uncond_tokens = [""] * batch_size
@@ -471,17 +525,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 attention_mask=attention_mask,
             )
             uncond_embeddings = uncond_embeddings[0]
-
-            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
-            seq_len = uncond_embeddings.shape[1]
-            uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
-            uncond_embeddings = uncond_embeddings.view(batch_size * num_images_per_prompt, seq_len, -1)
-
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
-            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-        return text_embeddings
+            self.uncond_embeddings_table[negative_prompt] = uncond_embeddings.cpu()
+        return uncond_embeddings
 
     def run_safety_checker(self, image, device, dtype):
         if self.safety_checker is not None:
@@ -569,6 +614,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         
+        estimate_depth: bool = False,
+        depth_map: Optional[torch.FloatTensor] = None,
         start_img: Optional[torch.Tensor] = None,
         img2img_strength: Optional[float] = None,
         seed=None,
@@ -657,31 +704,35 @@ class StableDiffusionPipeline(DiffusionPipeline):
         text_embeddings = self._encode_prompt(
             prompt, text_embeddings, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt
         )
+        
+        # 4. Prepare depth mask
+        if estimate_depth:
+            depth_mask = self.prepare_depth_map(
+                width,
+                height,
+                start_img,
+                depth_map,
+                batch_size * num_images_per_prompt,
+                do_classifier_free_guidance,
+                text_embeddings.dtype,
+                device,
+            )
+        else:
+            depth_mask = None
 
-        # 4. Prepare timesteps
+        # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # 5. Prepare latent variables
-        #num_channels_latents = self.unet.in_channels
-        #latents = self.prepare_latents(
-        #    batch_size * num_images_per_prompt,
-        #    num_channels_latents,
-        #    height,
-        #    width,
-        #    text_embeddings.dtype,
-        #    device,
-        #    generator,
-        #    latents,
-        #)
+        # 6. Prepare latent variables
         latents, init_latents, timesteps, noise = self.get_start_latents(width, height, 
-                                                    batch_size * num_images_per_prompt, 
-                                                    generator, text_embeddings, device, 
-                                                    start_img, noise, img2img_strength, 
-                                                    latents, num_inference_steps
-                                                   )
+                                                                        batch_size * num_images_per_prompt, 
+                                                                        generator, text_embeddings, device, 
+                                                                        start_img, noise, img2img_strength, 
+                                                                        latents, num_inference_steps
+                                                                       )
         
-        # 5.5 prepare mask
+        # 7 prepare mask
         # Prepare mask latent
         if mask_img:
             vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
@@ -691,26 +742,28 @@ class StableDiffusionPipeline(DiffusionPipeline):
             mask = None
         
 
-        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        # 8. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
-        # 7. Denoising loop
+        # 9. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self.set_progress_bar_config(disable=not verbose)
-        
         
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                if depth_mask is not None:
+                    latent_model_input = torch.cat([latent_model_input, depth_mask], dim=1)
 
                 # predict the noise residual
-                if self.compile_dir is None:
-                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
-                else:
+                if self.use_compiled:
                     # predict the noise residual
                     noise_pred = self.unet_inference(latent_model_input, t, encoder_hidden_states=text_embeddings)
+                else:
+                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+                    
                 
                 # perform guidance
                 if do_classifier_free_guidance:
@@ -731,14 +784,15 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     init_latents_proper = self.scheduler.add_noise(init_latents, noise, torch.tensor([t]))
                     # import ipdb; ipdb.set_trace()
                     latents = (init_latents_proper * mask) + (latents * (1 - mask)) 
+                    
 
-        # 8. Post-processing
+        # 10. Post-processing
         image = self.decode_latents(latents.to(text_embeddings.dtype))
 
-        # 9. Run safety checker
+        # 11. Run safety checker
         image, has_nsfw_concept = self.run_safety_checker(image, device, text_embeddings.dtype)
 
-        # 10. Convert to PIL
+        # 12. Convert to PIL
         if output_type == "pil":
             image = image.permute(0, 2, 3, 1).numpy()
             image = self.numpy_to_pil(image)
@@ -786,6 +840,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     
                 init_latents = latents
                 
+                #print("init latents shape: ", init_latents.shape)
+                #print("noise shape:", noise.shape)
                 # add noise
                 if img2img_strength is not None and img2img_strength != 0:
                     # with img2img we skip the first (1-strength) * num_inference_steps steps, so we increase the total step count
@@ -799,12 +855,16 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     
                     timesteps = self.scheduler.timesteps[t_start]
                     timesteps = torch.tensor([timesteps] * batch_size, device=device)
-                    # add noise to latents using the timesteps      
+                    # add noise to latents using the timesteps 
+                    noise = noise[:, :latents.shape[1]]  # noise is sampled by in_channels, so we need to eliminate one channel for noising properly
                     latents = self.scheduler.add_noise(latents, noise, timesteps)
         timesteps_tensor = self.scheduler.timesteps[t_start:].to(device)
         return latents, init_latents, timesteps_tensor, noise
     
-    def sample_noise(self, width=512, height=512, batch_size=1, generator=None, dtype=None, device="cpu"):
+    def sample_noise(self, width=512, height=512, batch_size=1, generator=None, dtype=None, device="cpu", seed=None):
+        if seed is not None:
+            generator = torch.Generator()
+            generator.manual_seed(seed)
         latents = torch.randn(batch_size, self.in_channels,
                                   height // 8, width // 8, generator=generator, device=device, dtype=dtype)
         return latents
@@ -831,11 +891,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 )
                 text_input_ids = text_input_ids[:, : self.tokenizer.model_max_length]
             
-            if self.compile_dir is None:
-                text_embedding = self.text_encoder(text_input_ids.to(device))[0]
-            else:
-                #text_embeddings = self.clip_inference(text_input.input_ids.to(self.device))
+            if self.use_compiled:
                 text_embedding = self.clip_inference(text_input_ids.to(device))
+            else:
+                text_embedding = self.text_encoder(text_input_ids.to(device))[0]                
             
             text_embeddings.append(text_embedding)
         if weights is None:
@@ -883,10 +942,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
         if output_type == "latent":
             return latents.detach().cpu()
         latents = latents / 0.18215
-        if self.compile_dir is None:
-            image = self.vae.decode(latents.to(device))["sample"]
-        else:
+        if self.use_compiled:
             image = self.vae_inference(latents.to(device))
+        else:
+            image = self.vae.decode(latents.to(device))["sample"]
+            
         image = (image / 2 + 0.5).float().clamp(0, 1)
         image = image.cpu()
         
@@ -895,6 +955,50 @@ class StableDiffusionPipeline(DiffusionPipeline):
         elif output_type == "numpy":
             image = image.permute(0, 2, 3, 1).numpy()
         return image
+    
+    def prepare_depth_map(self, width, height, image, depth_map, batch_size, do_classifier_free_guidance, dtype, device):
+        if image is None and depth_map is None:
+            return None
+        
+        if isinstance(image, PIL.Image.Image):
+            width, height = image.size
+            width, height = map(lambda dim: dim - dim % 32, (width, height))  # resize to integer multiple of 32
+            image = image.resize((width, height), resample=PIL_INTERPOLATION["lanczos"])
+            #width, height = image.size
+        else:
+            image = [img for img in image]
+            #width, height = image[0].shape[-2:]
+
+        if depth_map is None:
+            pixel_values = self.feature_extractor(images=image, return_tensors="pt").pixel_values
+            pixel_values = pixel_values.to(device=device)
+            
+            # The DPT-Hybrid model uses batch-norm layers which are not compatible with fp16.
+            # So we use `torch.autocast` here for half precision inference.
+            cast_dtype = torch.float16 if dtype == torch.bfloat16 else dtype
+            context_manger = torch.autocast("cuda", dtype=cast_dtype) if device.type == "cuda" else contextlib.nullcontext()
+            with context_manger:
+                depth_map = self.depth_estimator(pixel_values).predicted_depth            
+
+        depth_map = torch.nn.functional.interpolate(
+            depth_map.squeeze().unsqueeze(0).unsqueeze(1),
+            size=(height // self.vae_scale_factor, width // self.vae_scale_factor),
+            mode="bicubic",
+            align_corners=False,
+        )
+
+        depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
+        depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
+        depth_map = 2.0 * (depth_map - depth_min) / (depth_max - depth_min) - 1.0
+        depth_map = depth_map.to(dtype)
+
+        # duplicate mask and masked_image_latents for each generation per prompt, using mps friendly method
+        if depth_map.shape[0] < batch_size:
+            depth_map = depth_map.repeat(batch_size, 1, 1, 1)
+
+        depth_map = torch.cat([depth_map] * 2) if do_classifier_free_guidance else depth_map
+        depth_map = depth_map.to(device=device, dtype=dtype)
+        return depth_map
     
     def set_seed(self, seed):
         torch.manual_seed(seed)
@@ -906,39 +1010,39 @@ class StableDiffusionPipeline(DiffusionPipeline):
         
 def extra_loss_guidance():
     if loss_callbacks is not None and len(loss_callbacks) > 0:
-                    with torch.enable_grad():
-                        grads = torch.zeros_like(latents)
-                        step_index = self.scheduler.get_current_step(t)
-                        sigma = self.scheduler.sigmas[step_index]
-                        #denoised_images = None
-                        for callback_dict in loss_callbacks:
-                            if callback_dict["frequency"] is not None and i % callback_dict["frequency"] == 0:
-                                # Requires grad on the latents
-                                latents = latents.detach().requires_grad_()
-                                if callback_dict["apply_to_image"]:
-                                    # Get the predicted x0:
-                                    if scheduler_step_before_callbacks:
-                                        latents_x0 = latents
-                                    else:
-                                        if use_callbacks_simple_step:
-                                            # do simple step
-                                            latents_x0 = latents - sigma * noise_pred
-                                        else:
-                                            # actually use the scheduler step
-                                            latents_x0 = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+        with torch.enable_grad():
+            grads = torch.zeros_like(latents)
+            step_index = self.scheduler.get_current_step(t)
+            sigma = self.scheduler.sigmas[step_index]
+            #denoised_images = None
+            for callback_dict in loss_callbacks:
+                if callback_dict["frequency"] is not None and i % callback_dict["frequency"] == 0:
+                    # Requires grad on the latents
+                    latents = latents.detach().requires_grad_()
+                    if callback_dict["apply_to_image"]:
+                        # Get the predicted x0:
+                        if scheduler_step_before_callbacks:
+                            latents_x0 = latents
+                        else:
+                            if use_callbacks_simple_step:
+                                # do simple step
+                                latents_x0 = latents - sigma * noise_pred
+                            else:
+                                # actually use the scheduler step
+                                latents_x0 = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
-                                    # Decode to image space
-                                    #denoised_images = self.vae.decode((1 / 0.18215) * latents_x0) / 2 + 0.5  # (0, 1)
-                                    #if denoised_images is None:  
-                                    denoised_images = self.vae.decode(latents_x0 / 0.18215)["sample"] / 2 + 0.5  # (0, 1)
+                        # Decode to image space
+                        #denoised_images = self.vae.decode((1 / 0.18215) * latents_x0) / 2 + 0.5  # (0, 1)
+                        #if denoised_images is None:  
+                        denoised_images = self.vae.decode(latents_x0 / 0.18215)["sample"] / 2 + 0.5  # (0, 1)
 
-                                    # Calculate loss
-                                    loss = callback_dict["loss_function"](denoised_images)
-                                else:
-                                    loss = callback_dict["loss_function"](latents)
-                                # Get gradient
-                                cond_grad = -torch.autograd.grad(loss * callback_dict["weight"], latents)[0] 
-                                # Modify the latents based on this gradient
-                                grads += cond_grad * callback_dict["lr"]
+                        # Calculate loss
+                        loss = callback_dict["loss_function"](denoised_images)
+                    else:
+                        loss = callback_dict["loss_function"](latents)
+                    # Get gradient
+                    cond_grad = -torch.autograd.grad(loss * callback_dict["weight"], latents)[0] 
+                    # Modify the latents based on this gradient
+                    grads += cond_grad * callback_dict["lr"]
 
-                        latents = latents.detach() + grads * sigma**2
+            latents = latents.detach() + grads * sigma**2
