@@ -678,6 +678,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
             )
         else:
             depth_mask = None
+        self.depth_mask = depth_mask
+            
 
         # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -707,6 +709,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         # 9. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self.set_progress_bar_config(disable=not verbose)
+        
         
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -777,6 +780,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         # create starting image/noise
         if noise is None:
             noise = self.sample_noise(width, height, batch_size=batch_size, generator=generator, dtype=text_embeddings.dtype, device=device)
+            noise = noise[:, :4]  # noise is sampled by in_channels, so we need to eliminate one channel for depth
             
         t_start = 0
         init_latents = latents
@@ -786,6 +790,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 # if we use LMSDiscreteScheduler, let's make sure latents are mulitplied by sigmas
                 if isinstance(self.scheduler, LMSDiscreteScheduler):
                     latents = latents * self.scheduler.init_noise_sigma#((self.scheduler.sigmas[t_start]**2 + 1) ** 0.5)  
+                
+                    
                 init_latents = latents
                 
             else:
@@ -814,7 +820,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     timesteps = self.scheduler.timesteps[t_start]
                     timesteps = torch.tensor([timesteps] * batch_size, device=device)
                     # add noise to latents using the timesteps 
-                    noise = noise[:, :latents.shape[1]]  # noise is sampled by in_channels, so we need to eliminate one channel for noising properly
                     latents = self.scheduler.add_noise(latents, noise, timesteps)
         timesteps_tensor = self.scheduler.timesteps[t_start:].to(device)
         return latents, init_latents, timesteps_tensor, noise
@@ -920,7 +925,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             width, height = map(lambda dim: dim - dim % 32, (width, height))  # resize to integer multiple of 32
             image = image.resize((width, height), resample=PIL_INTERPOLATION["lanczos"])
             #width, height = image.size
-        else:
+        elif image is not None:
             image = [img for img in image]
             #width, height = image[0].shape[-2:]
 
@@ -936,12 +941,12 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 depth_map = self.depth_estimator(pixel_values).predicted_depth            
 
         depth_map = torch.nn.functional.interpolate(
-            depth_map.unsqueeze(1),
+            depth_map.squeeze().unsqueeze(0).unsqueeze(0),
             size=(height // self.vae_scale_factor, width // self.vae_scale_factor),
             mode="bicubic",
             align_corners=False,
         )
-
+            
         depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
         depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
         depth_map = 2.0 * (depth_map - depth_min) / (depth_max - depth_min) - 1.0
@@ -953,6 +958,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         depth_map = torch.cat([depth_map] * 2) if do_classifier_free_guidance else depth_map
         depth_map = depth_map.to(device=device, dtype=dtype)
+        
         return depth_map
     
     def set_seed(self, seed):
