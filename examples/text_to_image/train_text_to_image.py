@@ -398,16 +398,7 @@ def models_to_pipe(accelerator, use_ema, unet, ema_unet, text_encoder, vae, pret
     if lora_rank > 0:
         from lora_utils import UNetLORAMoDE
         new_unet = UNetLORAMoDE(new_unet, num_experts=num_experts)
-        #save_lora_weight(unet, "tmp/load_weights")
-        #unet_lora_params, _ = inject_trainable_lora(
-        #        new_unet, r=lora_rank#, loras=args.resume_unet
-        #    )
-    #else:
-    
     if use_ema:
-        #if lora_rank > 0:
-        #    new_unet.expert_weights = ema_unet.expert_weights.cuda()
-        #else:
         ema_unet.copy_to(new_unet.parameters())
         
     else:
@@ -441,7 +432,7 @@ def save_model(unet, ema_unet, accelerator, text_encoder, vae, weight_dtype, arg
     if args.lora_rank > 0:
         save_folder = os.path.join(args.output_dir, "lora_weights")
         os.makedirs(save_folder, exist_ok=True)
-        save_path = os.path.join(save_folder, f"fweights_at_{global_step}.pt")
+        save_path = os.path.join(save_folder, f"weights_at_{global_step}.pt")
         torch.save(unet.expert_weights, save_path)
 
         if args.use_ema:
@@ -490,7 +481,13 @@ def generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator,
                "Slavic dog head man, woolen torso in medieval clothes, characteristic of cynocephaly, oil painting, hyperrealism, beautiful, high resolution, trending on artstation",
                "Jesus taking a selfie, instagram, high detail, glamorous photograph, natural lighting",
               ]
-
+    
+    clip_processor, clip_model = load_clip_model()
+    clip_model.to(torch.float16).cuda()
+    rating_model = load_rating_model()
+    sims = []
+    ratings = []
+    
     out_dict = {}
     if args.max_width > 256:
         resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
@@ -508,9 +505,85 @@ def generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator,
             pil_img.save(img_path)
             # log to wandb
             out_dict[f"{width}x{height}/{i}{suffix}"] = wandb.Image(pil_img)
+            
+            # compute metrics
+            cosine_sim, img_out, text_out = compare_text_img(clip_processor, clip_model, p, pil_img)
+            with torch.no_grad():
+                aesthetic_rating = rating_model(torch.nn.functional.normalize(img_out))
+            # log metrics
+            out_dict[f"aesthetic/{i}"] = aesthetic_rating.item()
+            out_dict[f"cosine_sim/{i}"] = cosine_sim.item()
+            sims.append(cosine_sim.item())
+            ratings.append(aesthetic_rating.item())
+            
+            
+    out_dict[f"aesthetic/overall_mean"] = np.mean(ratings)
+    out_dict[f"cosine_sim/overall_mean"] = np.mean(sims)
     # upload log
     accelerator.log(out_dict, step=global_step)
     del pipe
+
+
+def load_clip_model():
+    from transformers import AutoProcessor, CLIPModel
+    clip_name = "openai/clip-vit-large-patch14"
+    clip_processor = AutoProcessor.from_pretrained(clip_name)
+    clip_model = CLIPModel.from_pretrained(clip_name).to(torch.float16)
+    return clip_processor, clip_model
+
+
+@torch.no_grad()
+def encode_text(clip_processor, clip_model, text):
+    inputs = clip_processor([text], padding=True, return_tensors="pt").to(clip_model.device)
+    text_features = clip_model.get_text_features(**inputs)
+    return text_features
+
+
+@torch.no_grad()
+def encode_image(clip_processor, clip_model, img):
+    inputs = clip_processor(images=img, return_tensors="pt").to(clip_model.device).pixel_values
+    image_features = clip_model.get_image_features(inputs.to(torch.float16))
+    return image_features
+
+
+def compare_text_img(clip_processor, clip_model, text, img):
+    img_out = encode_image(clip_processor, clip_model, img)
+    text_out = encode_text(clip_processor, clip_model, text)
+    cosine_sim = torch.nn.functional.cosine_similarity(img_out, text_out)
+    return cosine_sim, img_out, text_out
+
+
+import torch.nn as nn
+
+class MLP(torch.nn.Module):
+    def __init__(self, input_size):
+        super().__init__()
+        self.input_size = input_size
+        self.layers = nn.Sequential(
+            nn.Linear(self.input_size, 1024),
+            #nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(1024, 128),
+            #nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            #nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(64, 16),
+            #nn.ReLU(),
+            nn.Linear(16, 1)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+def load_rating_model():    
+    model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
+    s = torch.load("sac+logos+ava1-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
+    #s = torch.load("ava+logos-l14-reluMSE.pth")   # load the model you trained previously or the model available in this repo
+    model.load_state_dict(s)
+    model = model.to("cuda").eval().to(torch.float16)
+    return model
 
 
 def main():
@@ -608,12 +681,6 @@ def main():
         from lora_utils import UNetLORAMoDE
         unet = UNetLORAMoDE(unet, num_experts=args.num_experts)
         opt_params = itertools.chain(*itertools.chain(*unet.expert_weights))
-        
-        #unet.requires_grad_(False)
-        #unet_lora_params, _ = inject_trainable_lora(
-        #    unet, r=args.lora_rank#, loras=args.resume_unet
-        #)
-        #opt_params = itertools.chain(*unet_lora_params)
     else:
         opt_params = unet.parameters()
 
