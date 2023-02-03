@@ -490,7 +490,9 @@ def generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator,
     
     out_dict = {}
     if args.max_width > 256:
-        resolutions = [(512, 512), (256, 256), (1024, 512), (512, 1024)]
+        resolutions = [(512, 512), (1024, 512), (512, 1024)]
+        if args.min_width <= 256:
+            resolutions.append((256, 256))
     else:
         resolutions = [(128, 128), (64, 64), (128, 64), (64, 128)]
     for width, height in resolutions:
@@ -506,15 +508,16 @@ def generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator,
             # log to wandb
             out_dict[f"{width}x{height}/{i}{suffix}"] = wandb.Image(pil_img)
             
-            # compute metrics
-            cosine_sim, img_out, text_out = compare_text_img(clip_processor, clip_model, p, pil_img)
-            with torch.no_grad():
-                aesthetic_rating = rating_model(torch.nn.functional.normalize(img_out))
-            # log metrics
-            out_dict[f"aesthetic/{i}"] = aesthetic_rating.item()
-            out_dict[f"cosine_sim/{i}"] = cosine_sim.item()
-            sims.append(cosine_sim.item())
-            ratings.append(aesthetic_rating.item())
+            # compute metrics for square images:
+            if width == height:
+                cosine_sim, img_out, text_out = compare_text_img(clip_processor, clip_model, p, pil_img)
+                with torch.no_grad():
+                    aesthetic_rating = rating_model(torch.nn.functional.normalize(img_out))
+                # log metrics
+                out_dict[f"aesthetic/{i}"] = aesthetic_rating.item()
+                out_dict[f"cosine_sim/{i}"] = cosine_sim.item()
+                sims.append(cosine_sim.item())
+                ratings.append(aesthetic_rating.item())
             
             
     out_dict[f"aesthetic/overall_mean"] = np.mean(ratings)
@@ -607,7 +610,7 @@ def main():
     
     if accelerator.is_local_main_process:
         # wandb init
-        run = wandb.init(entity="finetuners")
+        run = wandb.init()
 
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -747,7 +750,10 @@ def main():
                 df = pd.read_parquet(cache)
             else:
                 with accelerator.main_process_first():
-                    df = create_df_from_parquets(args.train_data_dir_var_aspect, min_width=args.min_width, min_height=args.min_height, max_files=args.max_files)
+                    df = create_df_from_parquets(args.train_data_dir_var_aspect,
+                                                 min_width=args.min_width, 
+                                                 min_height=args.min_height,
+                                                 max_files=args.max_files)
                     df = assign_to_buckets(df, 
                                            bucket_step_size=64, 
                                            max_width=args.max_width, max_height=args.max_height,
@@ -916,7 +922,8 @@ def main():
     
     eval_every = 50 * args.gradient_accumulation_steps
     save_every = 50 * args.gradient_accumulation_steps
-    
+    if args.lora_rank == 0:
+        save_every *= 10
     
     for epoch in range(args.num_train_epochs):
         unet.train()
@@ -984,8 +991,6 @@ def main():
                     accelerator.log({"train_loss": train_loss, "lr": current_lr}, step=global_step)
                     train_loss = 0.0
 
-                
-
                 if global_step >= args.max_train_steps:
                     break
                 
@@ -993,7 +998,8 @@ def main():
             if accelerator.is_local_main_process:            
                 if step % eval_every == 0:
                     generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator, weight_dtype, args, use_ema_model=False, suffix="")
-                    generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator, weight_dtype, args, use_ema_model=True, suffix="_ema")
+                    if args.use_ema:
+                        generate_images(global_step, unet, ema_unet, vae, text_encoder, accelerator, weight_dtype, args, use_ema_model=True, suffix="_ema")
         
                 if step > 5 and step % save_every == 0:
                     save_model(unet, ema_unet, accelerator, text_encoder, vae, weight_dtype, args, global_step, save_ema=False)
