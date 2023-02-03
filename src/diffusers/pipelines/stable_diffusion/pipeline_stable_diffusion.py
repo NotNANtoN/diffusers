@@ -237,29 +237,24 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 compile_diffusers("", width, height, 77, 1, save_path=compile_dir, pipe=self)
                                                                           
             try:
-                self.clip_ait_exe = self.init_ait_module(
-                    model_name="CLIPTextModel", workdir=self.compile_dir
-                )
-                self.unet_ait_exe = self.init_ait_module(
-                    model_name="UNet2DConditionModel", workdir=self.compile_dir
-                )
-                self.vae_ait_exe = self.init_ait_module(
-                    model_name="AutoencoderKL", workdir=self.compile_dir
-                )
+                self.clip_ait_exe = self.init_ait_module(model_name="CLIPTextModel",
+                                                         workdir=self.compile_dir)
+                self.unet_ait_exe = self.init_ait_module(model_name="UNet2DConditionModel",
+                                                         workdir=self.compile_dir)
+                self.vae_ait_exe = self.init_ait_module(model_name="AutoencoderKL",
+                                                        workdir=self.compile_dir)
             except OSError as e:
                 print("Compiling models as they could not be loaded correctly...")
                 from .compile import compile_diffusers
                 compile_diffusers("", width, height, 77, 1, save_path=compile_dir)
                 
-                self.clip_ait_exe = self.init_ait_module(
-                    model_name="CLIPTextModel", workdir=self.compile_dir
-                )
-                self.unet_ait_exe = self.init_ait_module(
-                    model_name="UNet2DConditionModel", workdir=self.compile_dir
-                )
-                self.vae_ait_exe = self.init_ait_module(
-                    model_name="AutoencoderKL", workdir=self.compile_dir
-                )
+                self.clip_ait_exe = self.init_ait_module(model_name="CLIPTextModel", 
+                                                         workdir=self.compile_dir)
+                self.unet_ait_exe = self.init_ait_module(model_name="UNet2DConditionModel", 
+                                                         workdir=self.compile_dir)
+                self.vae_ait_exe = self.init_ait_module(model_name="AutoencoderKL", 
+                                                        workdir=self.compile_dir)
+            self.del_pt_models()
                 
     def to(self, *args, exclude_text=False, **kwargs):
         self.device_tracker = self.device_tracker.to(*args, **kwargs)
@@ -294,16 +289,19 @@ class StableDiffusionPipeline(DiffusionPipeline):
         
     def del_pt_models(self):
         # delete models to only use compiled version. keep vae encoder for encoding imgs
-        self.unet.to("cpu")
-        self.vae.decoder.to("cpu")
-        del self.unet
-        del self.vae.decoder
-        self.unet = None
-        self.vae.decoder = None
+        if hasattr(self, "unet"):
+            self.unet.to("cpu")
+            del self.unet
+            self.unet = None
+        if hasattr(self, "vae") and hasattr(self.vae, "decoder"):
+            self.vae.decoder.to("cpu")
+            del self.vae.decoder
+            self.vae.decoder = None
         if hasattr(self, "text_encoder"):
             self.text_encoder.to("cpu")
             del self.text_encoder
             self.text_encoder = None
+        torch.cuda.empty_cache()
             
     def init_ait_module(
         self,
@@ -457,17 +455,21 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     f" {self.tokenizer.model_max_length} tokens: {removed_text}"
                 )
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
-                attention_mask = text_inputs.attention_mask.to(device)
+            if hasattr(self, "text_encoder") and self.text_encoder is not None:
+                if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+                    attention_mask = text_inputs.attention_mask.to(device)
+                else:
+                    attention_mask = None
+        
+
+                text_embeddings = self.text_encoder(
+                    text_input_ids.to(device),
+                    attention_mask=attention_mask,
+                )
+                text_embeddings = text_embeddings[0]
             else:
-                attention_mask = None
-
-            text_embeddings = self.text_encoder(
-                text_input_ids.to(device),
-                attention_mask=attention_mask,
-            )
-            text_embeddings = text_embeddings[0]
-
+                text_embeddings = self.clip_inference(text_input_ids.to(device))
+                
             # duplicate text embeddings for each generation per prompt, using mps friendly method
             bs_embed, seq_len, _ = text_embeddings.shape
             text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
@@ -509,16 +511,20 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 return_tensors="pt",
             )
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
-                attention_mask = uncond_input.attention_mask.to(device)
-            else:
-                attention_mask = None
+            
+            if hasattr(self, "text_encoder") and self.text_encoder is not None:
+                if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+                    attention_mask = uncond_input.attention_mask.to(device)
+                else:
+                    attention_mask = None
 
-            uncond_embeddings = self.text_encoder(
-                uncond_input.input_ids.to(device),
-                attention_mask=attention_mask,
-            )
-            uncond_embeddings = uncond_embeddings[0]
+                uncond_embeddings = self.text_encoder(
+                    uncond_input.input_ids.to(device),
+                    attention_mask=attention_mask,
+                )
+                uncond_embeddings = uncond_embeddings[0]
+            else:
+                uncond_embeddings = self.clip_inference(uncond_input.input_ids.to(device))
             self.uncond_embeddings_table[negative_prompt] = uncond_embeddings.cpu()
         return uncond_embeddings
 
@@ -534,7 +540,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
     def decode_latents(self, latents):
         latents = 1 / 0.18215 * latents
-        image = self.vae.decode(latents).sample
+        if self.use_compiled:
+            image = self.vae_inference(latents)
+        else:
+            image = self.vae.decode(latents)["sample"]
+        
         image = (image / 2 + 0.5).clamp(0, 1)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         image = image.cpu().float()
@@ -608,6 +618,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         
+        t_start: int = 0,
         estimate_depth: bool = False,
         depth_map: Optional[torch.FloatTensor] = None,
         start_img: Optional[torch.Tensor] = None,
@@ -723,7 +734,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
                                                                         batch_size * num_images_per_prompt, 
                                                                         generator, text_embeddings, device, 
                                                                         start_img, noise, img2img_strength, 
-                                                                        latents, num_inference_steps
+                                                                        latents, num_inference_steps,
+                                                                        t_start
                                                                        )
         
         # 7 prepare mask
@@ -743,8 +755,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self.set_progress_bar_config(disable=not verbose)
         
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        progress_latents = []
+        with self.progress_bar(total=len(timesteps)) as progress_bar:
             for i, t in enumerate(timesteps):
+                progress_latents.append(latents.clone())
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
@@ -796,14 +810,15 @@ class StableDiffusionPipeline(DiffusionPipeline):
         if not return_dict:
             return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept,
+                                            latents=progress_latents)
 
     def get_start_latents(self, width, height, 
                           batch_size, generator, 
                           text_embeddings, device, 
                           start_img, noise, 
                           img2img_strength, latents, 
-                          num_inference_steps):    
+                          num_inference_steps, t_start):    
         # get the initial random noise unless the user supplied it
 
         # Unlike in other pipelines, latents need to be generated in the target device
@@ -814,7 +829,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
         if noise is None:
             noise = self.sample_noise(width, height, batch_size=batch_size, generator=generator, dtype=text_embeddings.dtype, device=device)
             
-        t_start = 0
         init_latents = latents
         if latents is None:
             if start_img is None:
