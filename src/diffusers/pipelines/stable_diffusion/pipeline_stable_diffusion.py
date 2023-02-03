@@ -261,7 +261,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         self._device = self.device_tracker.device
         self.input_type = self.device_tracker.dtype
         possible_models = [self.unet, self.vae]
-        if not exclude_text:
+        if not exclude_text and hasattr(self, "text_encoder"):
             possible_models.append(self.text_encoder)
         if hasattr(self, "depth_estimator"):
             possible_models.append(self.depth_estimator)
