@@ -14,7 +14,7 @@
 
 import os
 import inspect
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Tuple
 import random
 
 import torch
@@ -41,6 +41,9 @@ from ...schedulers import (
 from ...utils import deprecate, logging, PIL_INTERPOLATION
 from . import StableDiffusionPipelineOutput
 from .safety_checker import StableDiffusionSafetyChecker
+
+from .attend_and_excite_utils.ptp_utils import AttentionStore, register_attention_control
+from .attend_and_excite_utils.attend_and_excite import compute_loss, aggregate_and_get_max_attention_per_token, perform_iterative_refinement_step, update_latent
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -418,7 +421,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 return torch.device(module._hf_hook.execution_device)
         return self.device
 
-    def _encode_prompt(self, prompt, text_embeddings=None, device="cuda", num_images_per_prompt=1, do_classifier_free_guidance=False, negative_prompt=""):
+    def _encode_prompt(self, prompt, text_embeddings=None, device="cuda", num_images_per_prompt=1, do_classifier_free_guidance=False, negative_prompt="", return_text_inputs=False):
         r"""
         Encodes the prompt into text encoder hidden states.
 
@@ -436,7 +439,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 if `guidance_scale` is less than `1`).
         """
         batch_size = len(prompt) if isinstance(prompt, list) else 1
-
+        text_inputs = None
         if text_embeddings is None:
             text_inputs = self.tokenizer(
                 prompt,
@@ -489,7 +492,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
             text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-        return text_embeddings
+            
+        if return_text_inputs:
+            return text_inputs, text_embeddings
+        else:
+            return text_embeddings
     
     def init_uncond_embeddings(self, negative_prompt, device="cuda"):        
         if negative_prompt in self.uncond_embeddings_table:
@@ -628,6 +635,17 @@ class StableDiffusionPipeline(DiffusionPipeline):
         noise: Optional[torch.Tensor] = None,
         loss_callbacks: Optional[List] = None,
         mask_img: Optional = None,
+        # attend and excite params below
+        attention_store=None,
+        indices_to_alter: Optional[Tuple[int]]=None,
+        attention_res: int = 16,
+        max_iter_to_alter: Optional[int] = 25,
+        thresholds: Optional[dict] = None,
+        scale_factor: int = 20,
+        scale_range: Tuple[float, float] = (1., 0.5),
+        smooth_attentions: bool = True,
+        sigma: float = 0.5,
+        kernel_size: int = 3,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -683,6 +701,19 @@ class StableDiffusionPipeline(DiffusionPipeline):
             list of `bool`s denoting whether the corresponding generated image likely represents "not-safe-for-work"
             (nsfw) content, according to the `safety_checker`.
         """
+        
+        # prep for attend and excit
+        use_aae = (indices_to_alter is not None)
+        if use_aae:
+            if attention_store is None:
+                attention_store = AttentionStore()
+                
+            if thresholds is None:
+                thresholds = {0: 0.05, 10: 0.5, 20: 0.8}
+                
+                
+            register_attention_control(self, attention_store)
+        
         # 0.0 set seed
         if seed is not None:
             self.set_seed(seed)
@@ -706,8 +737,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
         do_classifier_free_guidance = guidance_scale > 1.0
 
         # 3. Encode input prompt
-        text_embeddings = self._encode_prompt(
-            prompt, text_embeddings, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt
+        text_inputs, text_embeddings = self._encode_prompt(prompt, text_embeddings, device, 
+                                                           num_images_per_prompt, 
+                                                           do_classifier_free_guidance, negative_prompt,
+                                                           return_text_inputs=True
         )
         
         # 4. Prepare depth mask
@@ -750,6 +783,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         # 8. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+        
+        if use_aae:
+            scale_range = np.linspace(scale_range[0], scale_range[1], len(self.scheduler.timesteps))
+            if max_iter_to_alter is None:
+                max_iter_to_alter = len(self.scheduler.timesteps) + 1
 
         # 9. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
@@ -765,6 +803,24 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 if depth_mask is not None:
                     latent_model_input = torch.cat([latent_model_input, depth_mask], dim=1)
 
+                # attend and excite:
+                if use_aae:
+                    self.attend_and_excite(latents,
+                         t, 
+                         text_embeddings,
+                         attention_store,
+                         indices_to_alter,
+                         attention_res,
+                         smooth_attentions,
+                         sigma,
+                         kernel_size,
+                         scale_range,
+                         scale_factor,
+                         thresholds,
+                         cross_attention_kwargs=None,
+                         text_inputs=text_inputs)
+                    
+                    
                 # predict the noise residual
                 if self.use_compiled:
                     # predict the noise residual
@@ -813,6 +869,70 @@ class StableDiffusionPipeline(DiffusionPipeline):
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept,
                                             latents=progress_latents)
 
+    @torch.enable_grad()
+    def attend_and_excite(self, 
+                         latents,
+                         t, 
+                         prompt_embeds,
+                         attention_store,
+                         indices_to_alter,
+                         attention_res,
+                         smooth_attentions,
+                         sigma,
+                         kernel_size,
+                         scale_range,
+                         scale_factor,
+                         thresholds,
+                         cross_attention_kwargs=None,
+                         text_inputs=None,
+                        ):
+        latents = latents.clone().detach().requires_grad_(True)
+
+        # Forward pass of denoising with text conditioning
+        noise_pred_text = self.unet(latents, t,
+                                    encoder_hidden_states=prompt_embeds[1].unsqueeze(0)).sample
+        self.unet.zero_grad()
+
+        # Get max activation value for each subject token
+        max_attention_per_index = aggregate_and_get_max_attention_per_token(
+            attention_store=attention_store,
+            indices_to_alter=indices_to_alter,
+            attention_res=attention_res,
+            smooth_attentions=smooth_attentions,
+            sigma=sigma,
+            kernel_size=kernel_size)
+
+        loss = compute_loss(max_attention_per_index=max_attention_per_index)
+
+        # If this is an iterative refinement step, verify we have reached the desired threshold for all
+        if i in thresholds.keys() and loss > 1. - thresholds[i]:
+            del noise_pred_text
+            torch.cuda.empty_cache()
+            loss, latents, max_attention_per_index = perform_iterative_refinement_step(
+                self.unet, self.tokenizer,
+                latents=latents,
+                indices_to_alter=indices_to_alter,
+                loss=loss,
+                threshold=thresholds[i],
+                text_embeddings=prompt_embeds,
+                text_input=text_inputs,
+                attention_store=attention_store,
+                step_size=scale_factor * np.sqrt(scale_range[i]),
+                t=t,
+                attention_res=attention_res,
+                smooth_attentions=smooth_attentions,
+                sigma=sigma,
+                kernel_size=kernel_size)
+
+        # Perform gradient update
+        if i < max_iter_to_alter:
+            loss = compute_loss(max_attention_per_index=max_attention_per_index)
+            if loss != 0:
+                latents = update_latent(latents=latents, loss=loss,
+                                        step_size=scale_factor * np.sqrt(scale_range[i]))
+            print(f'Iteration {i} | Loss: {loss:0.4f}')
+
+    
     def get_start_latents(self, width, height, 
                           batch_size, generator, 
                           text_embeddings, device, 
