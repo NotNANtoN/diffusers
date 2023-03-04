@@ -234,11 +234,18 @@ class StableDiffusionPipeline(DiffusionPipeline):
     def compile_models(self, compile_dir, width=512, height=512):
         self.compile_dir = compile_dir
         if self.compile_dir is not None:
+            
+             # check if we need to wait until other container/process compiles
+            lock_file_name = "compile.lock"
+            lock_file_path = os.path.join(compile_dir, lock_file_name)
+            while os.path.exists(lock_file_path):
+                print("Waiting for other processes/containers to compile model at ", compile_dir)
+                time.sleep(10)
+        
             self.use_compiled = True
-            if not os.path.exists(self.compile_dir) or not os.path.exists(os.path.join(self.compile_dir, "UNet2DConditionModel")):
-                from .compile import compile_diffusers
-                compile_diffusers("", width, height, 77, 1, save_path=compile_dir, pipe=self)
-                                                                          
+            model_names = ["CLIPTextModel", "UNet2DConditionModel", "AutoencoderKL"]
+            if any([not os.path.exists(os.path.join(self.compile_dir, name)) for name in model_names]):
+                self.apply_compile(self, compile_dir, lock_file_path, width, height)                               
             try:
                 self.clip_ait_exe = self.init_ait_module(model_name="CLIPTextModel",
                                                          workdir=self.compile_dir)
@@ -248,8 +255,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
                                                         workdir=self.compile_dir)
             except OSError as e:
                 print("Compiling models as they could not be loaded correctly...")
-                from .compile import compile_diffusers
-                compile_diffusers("", width, height, 77, 1, save_path=compile_dir)
+                
+                compile_diffusers("", width, height, 77, 1, save_path=compile_dir, pipe=self)
+                self.apply_compile(self, compile_dir, lock_file_path, width, height)
                 
                 self.clip_ait_exe = self.init_ait_module(model_name="CLIPTextModel", 
                                                          workdir=self.compile_dir)
@@ -258,7 +266,17 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 self.vae_ait_exe = self.init_ait_module(model_name="AutoencoderKL", 
                                                         workdir=self.compile_dir)
             self.del_pt_models()
-                
+            
+            
+    def apply_compile(self, compile_dir, lock_file_path, width, height):
+        # compile models, but first take care of lock file
+        open(lock_file_path, 'w').close()  # Create lock file
+        try:
+            from .compile import compile_diffusers
+            compile_diffusers("", width, height, 77, 1, save_path=compile_dir, pipe=self)    
+        finally:
+            os.remove(lock_file_path)  # Delete lock file
+                            
     def to(self, *args, exclude_text=False, **kwargs):
         self.device_tracker = self.device_tracker.to(*args, **kwargs)
         self._device = self.device_tracker.device
@@ -611,6 +629,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
         self,
         prompt: Union[str, List[str]] = None,
         text_embeddings: Optional[torch.Tensor] = None,
+        extra_prompts = None,
+        extra_embeddings = None,
         height: int = 512,
         width: int = 512,
         num_inference_steps: int = 50,
@@ -702,16 +722,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
         
-        # prep for attend and excit
+        # prep for attend and excite
         use_aae = (indices_to_alter is not None)
         if use_aae:
             if attention_store is None:
                 attention_store = AttentionStore()
-                
             if thresholds is None:
                 thresholds = {0: 0.05, 10: 0.5, 20: 0.8}
-                
-                
             register_attention_control(self, attention_store)
         
         # 0.0 set seed
@@ -742,6 +759,14 @@ class StableDiffusionPipeline(DiffusionPipeline):
                                                            do_classifier_free_guidance, negative_prompt,
                                                            return_text_inputs=True
         )
+        
+        if extra_prompts is not None or extra_prompts is not None:
+            prompt_iter = [None] * len(extra_prompts)
+            extra_inputs = self._encode_prompt(extra_prompts, extra_embeddings, device, 
+                                               num_images_per_prompt, 
+                                               do_classifier_free_guidance=False,  # no uncond emb
+                                               negative_prompt=negative_prompt,
+                                               return_text_inputs=False)
         
         # 4. Prepare depth mask
         if estimate_depth:

@@ -321,8 +321,8 @@ def compile_diffusers(
 ):
     logging.getLogger().setLevel(logging.INFO)
     np.random.seed(0)
-    torch.manual_seed(4896)
-
+    torch.manual_seed(4896)    
+    
     if detect_target().name() == "rocm":
         convert_conv_to_gemm = False
 
