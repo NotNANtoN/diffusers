@@ -245,7 +245,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             self.use_compiled = True
             model_names = ["CLIPTextModel", "UNet2DConditionModel", "AutoencoderKL"]
             if any([not os.path.exists(os.path.join(self.compile_dir, name)) for name in model_names]):
-                self.apply_compile(self, compile_dir, lock_file_path, width, height)                               
+                self.apply_compile(compile_dir, lock_file_path, width, height)                               
             try:
                 self.clip_ait_exe = self.init_ait_module(model_name="CLIPTextModel",
                                                          workdir=self.compile_dir)
@@ -257,7 +257,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 print("Compiling models as they could not be loaded correctly...")
                 
                 compile_diffusers("", width, height, 77, 1, save_path=compile_dir, pipe=self)
-                self.apply_compile(self, compile_dir, lock_file_path, width, height)
+                self.apply_compile(compile_dir, lock_file_path, width, height)
                 
                 self.clip_ait_exe = self.init_ait_module(model_name="CLIPTextModel", 
                                                          workdir=self.compile_dir)
