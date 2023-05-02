@@ -496,11 +496,18 @@ class StableDiffusionPipeline(DiffusionPipeline):
             bs_embed, seq_len, _ = text_embeddings.shape
             text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
             text_embeddings = text_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        else:
+            if isinstance(text_embeddings, np.ndarray):
+                text_embeddings = torch.from_numpy(text_embeddings).to(device)
+            elif not torch.is_tensor(text_embeddings):
+                # assumes it is a list or iterable
+                text_embeddings = text_embeddings[0].to(device)
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance:
             # embed negative prompt
-            uncond_embeddings = self.init_uncond_embeddings(negative_prompt, device).to(text_embeddings.device)
+            #print("Neg prompt: ", negative_prompt)
+            uncond_embeddings = self.init_uncond_embeddings(negative_prompt, device).to(device)
 
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = uncond_embeddings.shape[1]
@@ -517,7 +524,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         else:
             return text_embeddings
     
-    def init_uncond_embeddings(self, negative_prompt, device="cuda"):        
+    def init_uncond_embeddings(self, negative_prompt, device="cuda"):     
         if negative_prompt in self.uncond_embeddings_table:
             uncond_embeddings = self.uncond_embeddings_table[negative_prompt]
         else:
@@ -536,7 +543,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 truncation=True,
                 return_tensors="pt",
             )
-
             
             if hasattr(self, "text_encoder") and self.text_encoder is not None:
                 if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
@@ -552,6 +558,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             else:
                 uncond_embeddings = self.clip_inference(uncond_input.input_ids.to(device))
             self.uncond_embeddings_table[negative_prompt] = uncond_embeddings.cpu()
+        
         return uncond_embeddings
 
     def run_safety_checker(self, image, device, dtype):
@@ -1020,7 +1027,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
             generator = torch.Generator()
             generator.manual_seed(seed)
         latents = torch.randn(batch_size, self.in_channels,
-                                  height // 8, width // 8, generator=generator, device=device, dtype=dtype)
+                              height // 8, width // 8, 
+                              generator=generator, device=device, dtype=dtype)
         return latents
     
     @torch.no_grad()
