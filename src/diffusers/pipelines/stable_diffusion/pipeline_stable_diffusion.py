@@ -239,9 +239,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
              # check if we need to wait until other container/process compiles
             lock_file_name = "compile.lock"
             lock_file_path = os.path.join(compile_dir, lock_file_name)
+            start_wait_time = time.time()
             while os.path.exists(lock_file_path):
                 print("Waiting for other processes/containers to compile model at ", compile_dir)
                 time.sleep(10)
+                if time.time() - start_wait_time > 10 * 60:
+                    print("Waited for 10 minutes - deleting compile.lock")
+                    os.remove(lock_file_path)
         
             self.use_compiled = True
             model_names = ["CLIPTextModel", "UNet2DConditionModel", "AutoencoderKL"]
@@ -276,7 +280,10 @@ class StableDiffusionPipeline(DiffusionPipeline):
             from .compile import compile_diffusers
             compile_diffusers("", width, height, 77, 1, save_path=compile_dir, pipe=self)    
         finally:
-            os.remove(lock_file_path)  # Delete lock file
+            try:
+                os.remove(lock_file_path)  # Delete lock file
+            except Exception:
+                print("No compile.lock found!")
                             
     def to(self, *args, exclude_text=False, **kwargs):
         self.device_tracker = self.device_tracker.to(*args, **kwargs)
